@@ -16,6 +16,9 @@
     <Filter Include="Util">
       <UniqueIdentifier>{8389ae67-0af5-47ff-9e24-40767fdb8c55}</UniqueIdentifier>
     </Filter>
+    <Filter Include="CPython">
+      <UniqueIdentifier>{95194c78-4d33-4520-a73c-b1a403cc689f}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <CudaCompile Include="kernel.h">
@@ -27,7 +30,6 @@
     <CudaCompile Include="binary.cu">
       <Filter>Source</Filter>
     </CudaCompile>
-    <CudaCompile Include="test.cu" />
     <CudaCompile Include="fcpe.cu">
       <Filter>Module\FCPE</Filter>
     </CudaCompile>
@@ -48,10 +50,16 @@
     <ClInclude Include="npy.h">
       <Filter>Util</Filter>
     </ClInclude>
+    <ClInclude Include="cuFCPE.h">
+      <Filter>CPython</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="npy.cpp">
+    <ClCompile Include="npy.cu">
       <Filter>Util</Filter>
+    </ClCompile>
+    <ClCompile Include="cuFCPE.cpp">
+      <Filter>CPython</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>

@@ -23,6 +23,7 @@ namespace DragonianLib
 		int asyncCudaStream(stream_t stream);
 		const char* getCudaError(int errorId);
 		int getLastError();
+		const std::string& getLastErrorString();
 		template <typename T>
 		T* cudaAlloc(size_t size)
 		{

@@ -1,10 +1,15 @@
-﻿#include "cuda_runtime.h"
+﻿#include <cuda_fp16.h>
+#include <cuda_bf16.h>
+
+#include "cuda_runtime.h"
 #include "kernel.h"
 
 namespace DragonianLib
 {
 	namespace CudaProvider
 	{
+		thread_local std::string __LastError = "Empty";  // NOLINT(misc-use-internal-linkage)
+
 		void* cudaAllocate(size_t size)
 		{
 			void* block = nullptr;
@@ -31,6 +36,11 @@ namespace DragonianLib
 		int device2Device(void* dst, const void* src, size_t size, stream_t stream)
 		{
 			return cudaMemcpyAsync(dst, src, size, cudaMemcpyDeviceToDevice, (cudaStream_t)stream);
+		}
+
+		const std::string& getLastErrorString()
+		{
+			return __LastError;
 		}
 
 		stream_t createCudaStream()

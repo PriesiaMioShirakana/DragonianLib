@@ -1,7 +1,6 @@
 ﻿#pragma once
 #include "base.h"
 
-
 namespace DragonianLib
 {
     namespace CudaModules
@@ -20,12 +19,12 @@ namespace DragonianLib
                 );
 
                 layerStatus_t Forward(
-                    Tensor<float>& output,
-                    Tensor<float>& mean,
-                    Tensor<float>& var,
-                    Tensor<float>& cache,
-                    Tensor<float>& col
-                ) const;
+                    Tensor<moduleValueType>& output,
+                    Tensor<moduleValueType>& mean,
+                    Tensor<moduleValueType>& var,
+                    Tensor<moduleValueType>& cache,
+                    Tensor<moduleValueType>& col
+                ) const noexcept;
 
             private:
                 std::shared_ptr<LayerNorm1D> net_0;
@@ -51,17 +50,17 @@ namespace DragonianLib
                 );
 
                 layerStatus_t Forward(
-                    Tensor<float>& output,
-                    Tensor<float>& mean,
-                    Tensor<float>& var,
-                    Tensor<float>& res,
-                    Tensor<float>& cache,
-                    Tensor<float>& col
-                ) const;
+                    Tensor<moduleValueType>& output,
+                    Tensor<moduleValueType>& mean,
+                    Tensor<moduleValueType>& var,
+                    Tensor<moduleValueType>& res,
+                    Tensor<moduleValueType>& cache,
+                    Tensor<moduleValueType>& col
+                ) const noexcept;
 
             private:
                 std::shared_ptr<ConformerConvModule> conformer;
-                mutable Tensor<float> conformerOut;
+                mutable Tensor<moduleValueType> conformerOut;
                 std::shared_ptr<LayerNorm1D> norm;
             };
 
@@ -80,13 +79,13 @@ namespace DragonianLib
                 );
 
                 layerStatus_t Forward(
-                    Tensor<float>& output,
-                    Tensor<float>& mean,
-                    Tensor<float>& var,
-                    Tensor<float>& res,
-                    Tensor<float>& cache,
-                    Tensor<float>& col
-                ) const;
+                    Tensor<moduleValueType>& output,
+                    Tensor<moduleValueType>& mean,
+                    Tensor<moduleValueType>& var,
+                    Tensor<moduleValueType>& res,
+                    Tensor<moduleValueType>& cache,
+                    Tensor<moduleValueType>& col
+                ) const noexcept;
 
             private:
                 std::vector<std::shared_ptr<CFNEncoderLayer>> encoder_layers;
@@ -97,15 +96,22 @@ namespace DragonianLib
             public:
                 struct CacheTensors
                 {
-                    CacheTensors(Tensor<float>&& _i) : input(std::move(_i)) {}
-                    Tensor<float> input;
-                    Tensor<float> output;
+                    CacheTensors() = default;
+                    CacheTensors(Tensor<moduleValueType>&& _i) : input(std::move(_i)) {}
+                    Tensor<moduleValueType> input;
+                    Tensor<moduleValueType> output;
+                    Tensor<moduleValueType> res;
                     friend Model;
                 protected:
-                    Tensor<float> mean;
-                    Tensor<float> var;
-                    Tensor<float> res;
-                    Tensor<float> col;
+                    Tensor<moduleValueType> mean;
+                    Tensor<moduleValueType> var;
+                    Tensor<moduleValueType> col;
+                };
+
+                enum DECODER : uint8_t
+                {
+	                DECODER_ARGMAX,
+                    DECODER_LOCAL_ARGMAX
                 };
 
                 Model(
@@ -114,8 +120,8 @@ namespace DragonianLib
                     unsigned hiddenDims = 512,
                     unsigned numLayers = 6,
                     unsigned numHeads = 8,
-                    float f0Max = 1975.5f,
-                    float f0Min = 32.70f,
+                    moduleValueType f0Max = 1975.5f,
+                    moduleValueType f0Min = 32.70f,
                     bool useFaNorm = false,
                     bool convOnly = true,
                     bool useHarmonicEmb = false
@@ -123,7 +129,15 @@ namespace DragonianLib
 
                 layerStatus_t Forward(
                     CacheTensors& caches
-                ) const;
+                ) const noexcept;
+
+                layerStatus_t Infer(
+                    CacheTensors& caches,
+                    moduleValueType threshold = 0.05f,
+                    DECODER decoder = DECODER_LOCAL_ARGMAX
+                ) const noexcept;
+
+                void LoadFromFile(const std::wstring& view);
 
             private:
                 std::shared_ptr<Conv1D> input_stack_0;
@@ -133,6 +147,17 @@ namespace DragonianLib
                 std::shared_ptr<ConformerNaiveEncoder> net;
                 std::shared_ptr<LayerNorm1D> norm;
                 std::shared_ptr<Linear> output_proj;
+                std::shared_ptr<Parameter> cent_table, gaussian_blurred_cent_mask;
+
+                layerStatus_t Latent2Cents(
+                    CacheTensors& caches,
+                    moduleValueType threshold = 0.05f
+                ) const noexcept;
+
+                layerStatus_t Latent2CentsLocal(
+                    CacheTensors& caches,
+                    moduleValueType threshold = 0.05f
+                ) const noexcept;
             };
         }
     }

@@ -5,7 +5,7 @@
 #include "kernel.h"
 
 #ifndef DRAGONIANLIB_CUDA_EP_BENCHMARK
-#define DRAGONIANLIB_CUDA_EP_BENCHMARK 1
+#define DRAGONIANLIB_CUDA_EP_BENCHMARK 0
 #endif // DRAGONIANLIB_CUDA_EP_BENCHMARK
 
 #ifndef DRAGONIANLIB_CUDA_BLOCK_SIZE
@@ -21,8 +21,10 @@ namespace DragonianLib
     namespace CudaModules
     {
         typedef struct __Handle* handle_t;
+        typedef float moduleValueType;
 
         enum layerStatus_t : int8_t {
+            LAYER_STATUS_FATAL_ERROR = -2,
             LAYER_STATUS_SIZE_MISMATCH = -1,
             LAYER_STATUS_SUCCESS = 0,
             LAYER_STATUS_NOT_INITIALIZED = 1,
@@ -175,8 +177,12 @@ namespace DragonianLib
                     break;
                 }
             }
+            auto SizeInBytes() const
+            {
+                return sizeof(T) * N * C * W * H;
+            }
 
-            std::vector<T> Cpy2Host(stream_t _Stream) const
+            std::vector<T> Cpy2Host(stream_t _Stream = nullptr) const
             {
                 auto size = N * C * H * W;
                 std::vector<T> data(size);
@@ -184,7 +190,17 @@ namespace DragonianLib
                 return data;
             }
 
-            Tensor Clone(stream_t _Stream) const
+            template <typename Type>
+            std::vector<Type> Cpy2Host(stream_t _Stream = nullptr) const
+            {
+                static_assert(sizeof(Type) == sizeof(T), "error");
+                auto size = N * C * H * W;
+                std::vector<Type> data(size);
+                CudaProvider::cpy2Host(data.data(), (const Type*)Data, size, _Stream);
+                return data;
+            }
+
+            Tensor Clone(stream_t _Stream = nullptr) const
             {
                 if (!_Stream) _Stream = getHandleStream(Handle);
 
@@ -231,7 +247,6 @@ namespace DragonianLib
                     }
                 Data = nullptr;
                 N = C = H = W = Dim = BufferSize = 0;
-                Handle = nullptr;
             }
             bool Own = false;
         };
@@ -239,7 +254,7 @@ namespace DragonianLib
         class Module : std::enable_shared_from_this<Module>
         {
         public:
-            using DictType = std::unordered_map<std::string, Tensor<float>>;
+            using DictType = std::unordered_map<std::string, Tensor<moduleValueType>>;
             Module() = delete;
             
             virtual ~Module() = default;
@@ -261,18 +276,66 @@ namespace DragonianLib
             std::vector<Module*> Children;
         };
 
+        class MelKernel
+        {
+        public:
+            MelKernel(
+                unsigned samplingRate = 16000,
+                unsigned melBins = 128,
+                unsigned fftLength = 1024,
+                unsigned windowSize = 1024,
+                unsigned hopSize = 160,
+                moduleValueType freqMin = 0.f,
+                moduleValueType freqMax = 8000.f,
+                moduleValueType clipVal = 1e-5f
+            ) : m_samplingRate(samplingRate), m_melBins(melBins), m_fftSize(fftLength), m_windowSize(windowSize),
+                m_hopSize(hopSize), m_freqMin(freqMin), m_freqMax(freqMax), m_clipVal(clipVal)
+            {
+                Init();
+            }
+
+            layerStatus_t Stft(
+                const Tensor<moduleValueType>& input,
+                Tensor<moduleValueType>& output,
+                Tensor<moduleValueType>& cacheWindows,
+                bool center = false
+            ) const noexcept;
+
+            layerStatus_t Forward(
+                const Tensor<moduleValueType>& input,
+                Tensor<moduleValueType>& output,
+                Tensor<moduleValueType>& midCache,
+                bool center = false
+            ) const noexcept;
+
+        private:
+            unsigned m_samplingRate = 16000;
+            unsigned m_melBins = 128;
+            unsigned m_fftSize = 1024;
+            unsigned m_specBins = 513;
+            unsigned m_windowSize = 1024;
+            unsigned m_hopSize = 160;
+            moduleValueType m_freqMin = 0.f;
+            moduleValueType m_freqMax = 8000.f;
+            moduleValueType m_clipVal = 1e-5f;
+            Tensor<moduleValueType> m_melBasis;
+            Tensor<moduleValueType> m_window;
+
+            void Init();
+        };
+
         class Parameter : public Module
         {
         public:
             Parameter() = delete;
-            const Tensor<float>& GetTensor() const { return TensorData; }
-            Tensor<float>& SetTensor() { return TensorData; }
+            const Tensor<moduleValueType>& GetTensor() const { return TensorData; }
+            Tensor<moduleValueType>& SetTensor() { return TensorData; }
             void LoadModel(DictType& dict) override;
 
             Parameter(
                 Module* parent,
                 const std::string& name,
-                Tensor<float>&& tensor,
+                Tensor<moduleValueType>&& tensor,
                 bool strict = true
             ) : Module(parent, name), TensorData(std::move(tensor)), Strict(strict)
             {
@@ -280,7 +343,7 @@ namespace DragonianLib
             }
 
         private:
-			Tensor<float> TensorData;
+			Tensor<moduleValueType> TensorData;
 			bool Strict = true;
         };
 
@@ -290,9 +353,9 @@ namespace DragonianLib
             Conv1D() = delete;
 
             layerStatus_t Forward(
-                const Tensor<float>& input,
-                Tensor<float>& output,
-                Tensor<float>& col
+                const Tensor<moduleValueType>& input,
+                Tensor<moduleValueType>& output,
+                Tensor<moduleValueType>& col
             ) const noexcept;
 
             Conv1D(
@@ -319,18 +382,21 @@ namespace DragonianLib
             unsigned InputChannels = 1;
             unsigned OutputChannels = 1;
             bool BiasEnabled = true;
+            bool IsContiguous = false;
+            bool IsDwConv = false;
+            bool UseGemm = false;
         };
 
         class LeakyReLU
         {
         public:
-            LeakyReLU(float negativeSlope = 1e-2f) : NegativeSlope(negativeSlope) {}
+            LeakyReLU(moduleValueType negativeSlope = 1e-2f) : NegativeSlope(negativeSlope) {}
 
             layerStatus_t Forward(
-                Tensor<float>& output
+                Tensor<moduleValueType>& output
             ) const noexcept;
         private:
-            float NegativeSlope = 1e-2f;  // NOLINT(clang-diagnostic-unused-private-field)
+            moduleValueType NegativeSlope = 1e-2f;  // NOLINT(clang-diagnostic-unused-private-field)
         };
 
         class GroupNorm1D : public Module
@@ -339,9 +405,9 @@ namespace DragonianLib
             GroupNorm1D() = delete;
 
             layerStatus_t Forward(
-                Tensor<float>& output,
-                Tensor<float>& mean,
-                Tensor<float>& var
+                Tensor<moduleValueType>& output,
+                Tensor<moduleValueType>& mean,
+                Tensor<moduleValueType>& var
             ) const noexcept;
 
             GroupNorm1D(
@@ -349,7 +415,7 @@ namespace DragonianLib
                 const std::string& name,
                 unsigned numGroups,
                 unsigned numChannels,
-                float eps = 1e-5f,
+                moduleValueType eps = 1e-5f,
                 bool affine = true
             );
 
@@ -358,7 +424,7 @@ namespace DragonianLib
             std::shared_ptr<Parameter> Bias;
             unsigned NumGroups = 1;
             unsigned NumChannels = 1;
-            float Epsilon = 1e-5f;  // NOLINT(clang-diagnostic-unused-private-field)
+            moduleValueType Epsilon = 1e-5f;  // NOLINT(clang-diagnostic-unused-private-field)
             bool AffineEnabled = true;
         };
 
@@ -368,16 +434,16 @@ namespace DragonianLib
             LayerNorm1D() = delete;
             
             layerStatus_t Forward(
-                Tensor<float>& output,
-                Tensor<float>& mean,
-                Tensor<float>& var
+                Tensor<moduleValueType>& output,
+                Tensor<moduleValueType>& mean,
+                Tensor<moduleValueType>& var
 			) const noexcept;
 
             LayerNorm1D(
                 Module* parent,
                 const std::string& name,
                 unsigned numChannels,
-                float eps = 1e-5f,
+                moduleValueType eps = 1e-5f,
                 bool affine = true,
                 bool bias = true
             );
@@ -386,7 +452,7 @@ namespace DragonianLib
             std::shared_ptr<Parameter> Weight;
             std::shared_ptr<Parameter> Bias;
             unsigned NumChannels = 1;
-            float Epsilon = 1e-5f;  // NOLINT(clang-diagnostic-unused-private-field)
+            moduleValueType Epsilon = 1e-5f;  // NOLINT(clang-diagnostic-unused-private-field)
             bool BiasEnabled = true;
             bool AffineEnabled = true;
         };
@@ -397,8 +463,8 @@ namespace DragonianLib
             Linear() = delete;
 
             layerStatus_t Forward(
-                const Tensor<float>& input,
-                Tensor<float>& output
+                const Tensor<moduleValueType>& input,
+                Tensor<moduleValueType>& output
 			) const noexcept;
 
             Linear(
@@ -418,13 +484,13 @@ namespace DragonianLib
         };
 
         layerStatus_t AddTensor(
-            Tensor<float>& output,
-            const Tensor<float>& input
-        );
+            Tensor<moduleValueType>& output,
+            const Tensor<moduleValueType>& input
+        ) noexcept;
 
         layerStatus_t SigmoidTensor(
-            Tensor<float>& output
-        );
+            Tensor<moduleValueType>& output
+        ) noexcept;
 
         class Transpose
         {
@@ -432,8 +498,8 @@ namespace DragonianLib
             Transpose() = default;
 
             static layerStatus_t Forward(
-                const Tensor<float>& input,
-                Tensor<float>& output
+                const Tensor<moduleValueType>& input,
+                Tensor<moduleValueType>& output
             ) noexcept;
         };
 
@@ -443,8 +509,8 @@ namespace DragonianLib
             GLU() = default;
 
             static layerStatus_t Forward(
-                const Tensor<float>& input,
-                Tensor<float>& output
+                const Tensor<moduleValueType>& input,
+                Tensor<moduleValueType>& output
             ) noexcept;
         };
 
@@ -454,7 +520,7 @@ namespace DragonianLib
             SiLU() = default;
 
             static layerStatus_t Forward(
-                Tensor<float>& output
+                Tensor<moduleValueType>& output
             ) noexcept;
         };
     }

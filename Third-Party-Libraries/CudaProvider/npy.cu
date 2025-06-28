@@ -24,35 +24,6 @@ namespace DragonianLib
 			throw std::runtime_error("Unsupported numpy type: " + _Type);
 		}
 
-		class FileGuard  // NOLINT(cppcoreguidelines-special-member-functions)
-		{
-		public:
-			FileGuard(const std::wstring& _Path, const wchar_t* _Mode)
-			{
-				FileHandle = _wfopen(_Path.c_str(), _Mode);
-			}
-			~FileGuard()
-			{
-				if (FileHandle)
-					fclose(FileHandle);
-			}
-
-			bool Enabled() const
-			{
-				return FileHandle != nullptr;
-			}
-
-			size_t Read(void* _Buffer, size_t _Size, size_t _Count) const
-			{
-				if (!FileHandle)
-					return 0;
-				return fread(_Buffer, _Size, _Count, FileHandle);
-			}
-
-		private:
-			FILE* FileHandle = nullptr;
-		};
-
 		std::pair<std::vector<int64_t>, std::vector<Byte>> LoadNumpyFile(const std::wstring& _Path)
 		{
 			FileGuard _MyFile(_Path, L"rb");
@@ -125,6 +96,9 @@ namespace DragonianLib
 					break;
 				case 1:
 					Tensor.Resize((unsigned)Shape[0]);
+					break;
+				case 0:
+					Tensor.Resize((unsigned)1);
 					break;
 				default:
 					throw std::runtime_error("Unsupported shape size: " + std::to_string(Shape.size()));

@@ -2,13 +2,19 @@
 #include <device_launch_parameters.h>
 
 #include "base.h"
-
 #include "cublas_v2.h"
+#include "cufftw.h"
 
 namespace DragonianLib
 {
+    namespace CudaProvider
+    {
+        extern thread_local std::string __LastError;
+    }
+
     namespace CudaModules
     {
+
         class Timer  // NOLINT(cppcoreguidelines-special-member-functions)
         {
         public:
@@ -61,6 +67,433 @@ namespace DragonianLib
             return stream_t(stream);
         }
 
+        static std::vector<moduleValueType> HannWindow(
+            size_t WindowSize,
+            bool Periodic = false
+        )
+        {
+            std::vector<moduleValueType> Window(WindowSize);
+            const size_t Denominator = Periodic ? WindowSize : WindowSize - 1;
+            const auto Step = moduleValueType(2) * 3.1415926535f / static_cast<moduleValueType>(Denominator);  // NOLINT(modernize-use-std-numbers)
+            for (size_t i = 0; i < WindowSize; i++)
+                Window[i] = static_cast<moduleValueType>(0.5) * (static_cast<moduleValueType>(1) - cos(Step * static_cast<moduleValueType>(i)));
+            return Window;
+        }
+
+        static double HZ2Mel(const double frequency)
+        {
+            constexpr auto f_min = 0.0;
+            constexpr auto f_sp = 200.0 / 3;
+            auto mel = (frequency - f_min) / f_sp;
+            constexpr auto min_log_hz = 1000.0;
+            constexpr auto min_log_mel = (min_log_hz - f_min) / f_sp;
+            const auto logstep = log(6.4) / 27.0;
+            if (frequency >= min_log_hz)
+                mel = min_log_mel + log(frequency / min_log_hz) / logstep;
+            return mel;
+        }
+
+        static double Mel2HZ(const double mel)
+        {
+            constexpr auto f_min = 0.0;
+            constexpr auto f_sp = 200.0 / 3;
+            auto freqs = f_min + f_sp * mel;
+            constexpr auto min_log_hz = 1000.0;
+            constexpr auto min_log_mel = (min_log_hz - f_min) / f_sp;
+            const auto logstep = log(6.4) / 27.0;
+            if (mel >= min_log_mel)
+                freqs = min_log_hz * exp(logstep * (mel - min_log_mel));
+            return freqs;
+        }
+
+        static std::vector<moduleValueType> Arange(moduleValueType begin, moduleValueType end, moduleValueType step)
+        {
+            auto size = size_t((end - begin) / step);
+            std::vector<moduleValueType> ret;
+            ret.reserve(size);
+            while (size--)
+            {
+                ret.emplace_back(begin);
+                begin += step;
+            }
+            return ret;
+        }
+
+        static std::vector<moduleValueType> Linspace(moduleValueType _Begin,moduleValueType _End,size_t _Count,bool _EndPoint = false)
+        {
+            if (_EndPoint)
+            {
+                const auto Step = (_End - _Begin) / moduleValueType(_Count - 1);
+                return Arange(_Begin, _End + (Step * 1.01f), Step);
+            }
+            const auto Step = (_End - _Begin) / moduleValueType(_Count);
+            return Arange(_Begin, _End + Step * 0.01f, Step);
+        }
+
+        static std::vector<moduleValueType> Diff(const std::vector<moduleValueType>& input)
+        {
+            if (input.size() < 2)
+                return {};
+            std::vector<moduleValueType> differences;
+            differences.reserve(input.size() - 1);
+            for (size_t i = 1; i < input.size(); ++i)
+                differences.emplace_back(input[i] - input[i - 1]);
+            return differences;
+        }
+
+        static std::vector<std::vector<moduleValueType>> Outer(const std::vector<moduleValueType>& a, const std::vector<moduleValueType>& b)
+        {
+            std::vector<std::vector<moduleValueType>> result(a.size(), std::vector<moduleValueType>(b.size()));
+            for (size_t i = 0; i < a.size(); ++i)
+                for (size_t j = 0; j < b.size(); ++j)
+                    result[i][j] = a[i] - b[j];
+            return result;
+        }
+
+        static std::vector<moduleValueType> operator-(const std::vector<moduleValueType>& a)
+        {
+            std::vector<moduleValueType> result(a.size());
+            for (size_t i = 0; i < a.size(); ++i)
+                result[i] = -a[i];
+            return result;
+        }
+
+        static std::vector<moduleValueType> operator/(const std::vector<moduleValueType>& a, moduleValueType b)
+        {
+            std::vector<moduleValueType> result(a.size());
+            for (size_t i = 0; i < a.size(); ++i)
+                result[i] = a[i] / b;
+            return result;
+        }
+
+        static std::vector<moduleValueType> Max(const std::vector<moduleValueType>& a, moduleValueType b)
+        {
+            std::vector<moduleValueType> result(a.size());
+            for (size_t i = 0; i < a.size(); ++i)
+                result[i] = std::max(a[i], b);
+            return result;
+        }
+
+        static std::vector<moduleValueType> Min(const std::vector<moduleValueType>& a, const std::vector<moduleValueType>& b)
+        {
+            if (a.size() != b.size())
+                throw std::invalid_argument("Vectors a and b must have the same size.");
+
+            std::vector<moduleValueType> result(a.size());
+            for (size_t i = 0; i < a.size(); ++i)
+                result[i] = std::min(a[i], b[i]);
+            return result;
+        }
+
+        static std::vector<moduleValueType> operator-(const std::vector<moduleValueType>& a, const std::vector<moduleValueType>& b)
+        {
+            if (a.size() != b.size())
+                throw std::invalid_argument("Vectors a and b must have the same size.");
+
+            std::vector<moduleValueType> result(a.size());
+            for (size_t i = 0; i < a.size(); ++i)
+                result[i] = a[i] - b[i];
+            return result;
+        }
+
+        static std::vector<std::vector<moduleValueType>>& operator*=(std::vector<std::vector<moduleValueType>>& input, moduleValueType val)
+        {
+            for (auto& i : input)
+                for (auto& j : i)
+                    j *= val;
+            return input;
+        }
+
+        static std::vector<std::vector<moduleValueType>>& operator/=(std::vector<std::vector<moduleValueType>>& input, const std::vector<moduleValueType>& val)
+        {
+            if (input.size() == val.size())
+                for (size_t i = 0; i < input.size(); ++i)
+                    for (size_t j = 0; j < input[0].size(); ++j)
+                        input[i][j] /= val[i];
+            return input;
+        }
+
+        void MelKernel::Init()
+        {
+            if (m_fftSize < m_windowSize)
+                throw std::runtime_error("m_fftSize could not less than m_windowSize");
+
+            m_window.Resize(m_windowSize);
+            auto Window = HannWindow(m_windowSize);
+            CudaProvider::cpy2Device(m_window.Data, Window.data(), Window.size(), nullptr);
+
+            double MEL_MIN = HZ2Mel(m_freqMin);
+            double MEL_MAX = HZ2Mel(m_freqMax);
+            m_specBins = m_fftSize / 2 + 1;
+
+            auto Weight = std::vector<std::vector<moduleValueType>>(m_melBins, std::vector<moduleValueType>(m_specBins));
+        	/*Tensor<Float32, 2, Device::CPU>::Empty(
+                Dimensions{ MEL_BINS, FFT_BINS }
+            );*/
+            const auto DSR = 1.f / moduleValueType(m_samplingRate);
+            const auto VAl = 1.f / (DSR * moduleValueType(m_fftSize));
+            const auto N = moduleValueType(m_specBins);
+            auto FFT_FREQS = Arange(
+                0.f, N, 1.f
+            );
+            auto MEL_F = Linspace(
+                moduleValueType(MEL_MIN), moduleValueType(MEL_MAX), m_melBins + 2, true
+            );
+
+            for (auto& POINT : MEL_F)
+                POINT = (moduleValueType)Mel2HZ((double)POINT);
+            for (auto& POINT : FFT_FREQS)
+                POINT *= VAl;
+
+            auto F_DIFF = Diff(MEL_F);
+            auto RAMPS = Outer(MEL_F, FFT_FREQS);
+
+            for (unsigned i = 0; i < m_melBins; ++i)
+            {
+                auto UPPER = RAMPS[i + 2] / F_DIFF[i + 1];
+                auto LOWER = -RAMPS[i] / F_DIFF[i];
+                Weight[i] = Max(Min(LOWER, UPPER), 0.f);
+            }
+            auto ENORM = std::vector<moduleValueType>{ MEL_F.begin() + 2, MEL_F.end() } -
+                std::vector<moduleValueType>{ MEL_F.begin(), MEL_F.begin() + m_melBins };
+            (Weight *= 2) /= ENORM;
+            m_melBasis.Resize(m_melBins, m_specBins);
+            for (size_t i = 0; i < m_melBins; ++i)
+                CudaProvider::cpy2Device(
+                    m_melBasis.Data + i * m_specBins,
+                    Weight[i].data(),
+                    Weight[i].size(),
+                    nullptr
+                );
+        }
+
+        static __global__ void appendWindow(
+            moduleValueType* outWindows,
+            const moduleValueType* inSignal,
+            const moduleValueType* inWindow,
+            unsigned frameCount,
+            unsigned fftSize,
+            unsigned signalLength,
+            unsigned windowSize,
+            unsigned hopSize,
+            unsigned center
+        )
+        {
+			//[batchSize, frameCount, fftSize]
+			//[batchSize, signalLength]
+            const unsigned batchIdx = blockIdx.z;
+            const unsigned frameIdx = blockIdx.y * blockDim.y + threadIdx.y;
+            const unsigned sigIdx = blockIdx.x * blockDim.x + threadIdx.x;
+            const unsigned off = (fftSize - windowSize) / 2;
+
+            if (frameIdx >= frameCount || sigIdx >= fftSize)
+                return;
+
+            const unsigned srcBegIdx = (center ? windowSize / 2 : 0) + frameIdx * hopSize;
+			const unsigned curRemain = signalLength - srcBegIdx - 1;
+
+			//inSignal[batchSize, :]
+            auto srcData = inSignal + (ptrdiff_t)batchIdx * signalLength + srcBegIdx;
+			//outWindows[batchIdx, frameIdx, :]
+            auto dstData = outWindows + (ptrdiff_t)(batchIdx * frameCount + frameIdx) * fftSize;
+
+            if (sigIdx < off || sigIdx > curRemain)
+                dstData[sigIdx] = 0.f;
+            else
+                dstData[sigIdx] = inWindow[sigIdx - off] * srcData[sigIdx];
+        }
+
+        layerStatus_t MelKernel::Stft(
+            const Tensor<moduleValueType>& input,
+            Tensor<moduleValueType>& output,
+            Tensor<moduleValueType>& cacheWindows,
+            bool center
+        ) const noexcept try
+        {
+#if DRAGONIANLIB_CUDA_EP_BENCHMARK
+            auto __BENCH_TM_BEG = Timer("Stft", &output.Handle);
+#endif
+
+            const auto Stream = (cudaStream_t)getHandleStream(input.Handle);
+
+            const auto signalBatch = input.H * input.C * input.N; const auto signalLength = input.W;
+            const auto frames = (signalLength - m_windowSize) / m_hopSize + 1;
+            //const auto correctSize = frames * m_hopSize + (m_fftLength - m_hopSize);
+
+            cacheWindows.Resize(signalBatch, frames, m_fftSize);
+            if (cacheWindows.Handle) CudaProvider::asyncCudaStream(getHandleStream(cacheWindows.Handle));
+            cacheWindows.Handle = input.Handle;
+
+            dim3 blockSize(
+                DRAGONIANLIB_CUDA_BLOCK_SIZE / 32,
+                32
+            );
+            dim3 gridSize(
+                (m_fftSize + blockSize.x - 1) / blockSize.x,
+                (frames + blockSize.y - 1) / blockSize.y,
+                signalBatch
+            );
+
+            appendWindow<<<gridSize, blockSize, 0, Stream>>>(
+                cacheWindows.Data,
+                input.Data,
+                m_window.Data,
+                frames,
+                m_fftSize,
+                signalLength,
+                m_windowSize,
+                m_hopSize,
+                center
+            );
+
+            output.Resize(signalBatch, frames, m_specBins, 2);
+            if (output.Handle) CudaProvider::asyncCudaStream(getHandleStream(output.Handle));
+            output.Handle = input.Handle;
+
+            cufftHandle handle;
+            int n[] = { static_cast<int>(m_fftSize) };
+            int inembed[] = { static_cast<int>(signalBatch * frames), static_cast<int>(m_fftSize) };
+            int oembed[] = { static_cast<int>(signalBatch * frames), static_cast<int>(m_specBins) };
+            if (cufftPlanMany(
+                &handle, 1, n,
+                inembed, 1, static_cast<int>(m_fftSize),
+                oembed, 1, static_cast<int>(m_specBins),
+                CUFFT_R2C, static_cast<int>(signalBatch * frames)) ||
+                cufftSetStream(handle, Stream) ||
+                cufftExecR2C(handle, cacheWindows.Data, (cuFloatComplex*)output.Data) ||
+                cudaStreamSynchronize(Stream))
+            {
+                if (handle) cufftDestroy(handle);
+                return LAYER_STATUS_FATAL_ERROR;
+            }
+            cufftDestroy(handle);
+            return LAYER_STATUS_SUCCESS;
+        }
+        catch (std::exception& except)
+        {
+            CudaProvider::__LastError = except.what();
+            return LAYER_STATUS_FATAL_ERROR;
+        }
+
+        static __global__ void implPowerSpec(
+            moduleValueType* oPowerSpec,
+            const moduleValueType* iSpec,
+            unsigned frameLength,
+            unsigned specBins
+        )
+        {
+			const unsigned batchIdx = blockIdx.z;
+			const unsigned binIdx = blockIdx.y * blockDim.y + threadIdx.y;
+            const unsigned frameIdx = blockIdx.x * blockDim.x + threadIdx.x;
+
+            if (frameIdx >= frameLength || binIdx >= specBins)
+				return;
+
+            //batchSize, specBins, frameLength
+            const unsigned outIdx = (batchIdx * specBins + binIdx) * frameLength + frameIdx;
+            //batchSize, frameLength, specBins, 2
+            const unsigned inIdx = ((batchIdx * frameLength + frameIdx) * specBins + binIdx) * 2;
+
+            moduleValueType real = iSpec[inIdx], imag = iSpec[inIdx + 1];
+            oPowerSpec[outIdx] = sqrtf(real * real + imag * imag + 1e-9f);
+        }
+
+        static __global__ void dynamicRangeCompression(
+            moduleValueType* output,
+            unsigned size,
+            moduleValueType clipVal,
+            moduleValueType C
+        )
+        {
+            const unsigned idx = blockIdx.x * blockDim.x + threadIdx.x;
+            if (idx >= size)
+                return;
+            auto& val = output[idx];
+            val = logf((val < clipVal ? clipVal : val) * C);
+        }
+
+        layerStatus_t MelKernel::Forward(
+            const Tensor<moduleValueType>& input,
+            Tensor<moduleValueType>& output,
+            Tensor<moduleValueType>& midCache,
+            bool center
+        ) const noexcept try
+        {
+#if DRAGONIANLIB_CUDA_EP_BENCHMARK
+            auto __BENCH_TM_BEG = Timer("MelSpec", &output.Handle);
+#endif
+
+            if (auto Ret = Stft(
+                input,
+                output,
+                midCache,
+                center
+            )) return Ret;
+
+            const unsigned batchSize = output.N;
+            const unsigned frameLength = output.C;
+            const unsigned specBins = output.H;
+            const unsigned melBins = m_melBins;
+            if (specBins != m_specBins)
+                return LAYER_STATUS_SIZE_MISMATCH;
+
+            midCache.Resize(batchSize, specBins, frameLength); //power spec
+            if (midCache.Handle) CudaProvider::asyncCudaStream(getHandleStream(midCache.Handle));
+            midCache.Handle = input.Handle;
+
+            const auto Stream = (cudaStream_t)getHandleStream(output.Handle);
+            dim3 blockSize(
+                DRAGONIANLIB_CUDA_BLOCK_SIZE / 32,
+                32
+            );
+            dim3 gridSize(
+                (frameLength + blockSize.x - 1) / blockSize.x,
+                (specBins + blockSize.y - 1) / blockSize.y,
+                batchSize
+            );
+            implPowerSpec<<<gridSize, blockSize, 0, Stream>>>(
+                midCache.Data,
+                output.Data,
+                frameLength,
+                specBins
+                );
+            cudaStreamSynchronize(Stream);
+            //[batchSize, specBins, frameLength] * [1, melBins, specBins] -> [batchSize, melBins, frameLength]
+            output.Resize(batchSize, melBins, frameLength);
+            if (output.Handle) CudaProvider::asyncCudaStream(getHandleStream(output.Handle));
+			output.Handle = input.Handle;
+
+            static constexpr moduleValueType Alpha = 1.0f;
+            static constexpr moduleValueType Beta = 0.0f;
+
+            if (auto Ret = cublasSgemmStridedBatched(
+                cublasHandle_t(output.Handle), CUBLAS_OP_N, CUBLAS_OP_N,
+                (int)frameLength, (int)melBins, (int)specBins,
+                &Alpha,
+                midCache.Data, (int)frameLength, (ptrdiff_t)specBins * frameLength,
+                m_melBasis.Data, (int)specBins, 0,
+                &Beta,
+                output.Data, (int)frameLength, (ptrdiff_t)melBins * frameLength,
+                (int)batchSize
+            )) return static_cast<layerStatus_t>(Ret);
+
+            auto size = output.N * output.C * output.W * output.H;
+            dim3 blockLength(DRAGONIANLIB_CUDA_BLOCK_SIZE);
+            dim3 gridLength((size + blockLength.x - 1) / blockLength.x);
+            dynamicRangeCompression<<<gridLength, blockLength, 0, Stream>>>(
+                output.Data,
+                size,
+                1e-5f,
+                1.f
+                );
+            return LAYER_STATUS_SUCCESS;
+        }
+        catch (std::exception& except)
+        {
+            CudaProvider::__LastError = except.what();
+            return LAYER_STATUS_FATAL_ERROR;
+        }
+
         Module::Module(Module* parent, const std::string& name)
         {
             if (parent)
@@ -100,7 +533,7 @@ namespace DragonianLib
                 throw std::runtime_error("Parameter " + Name + " not found in model dictionary.");
         }
 
-        static __global__ void broadcastAddKernel(float* A, const float* bias, unsigned YL, unsigned XL)
+        static __global__ void broadcastAddKernel(moduleValueType* A, const moduleValueType* bias, unsigned YL, unsigned XL)
     	{
             const unsigned ty = threadIdx.y;
             const unsigned tx = threadIdx.x;
@@ -108,7 +541,7 @@ namespace DragonianLib
             unsigned y = blockIdx.y * blockDim.y + ty;
             unsigned x = blockIdx.x * blockDim.x + tx;
 
-            extern __shared__ float broadcastAddSharedBias[];
+            extern __shared__ moduleValueType broadcastAddSharedBias[];
 
             if (threadIdx.y == 0 && x < XL)
                 broadcastAddSharedBias[threadIdx.x] = bias[x];
@@ -121,200 +554,256 @@ namespace DragonianLib
 
         template <unsigned blockSizeX>
 		static __global__ void layerReduceMeanKernel(
-			const float* iFeat,
-			float* oMean,
+			const moduleValueType* iFeat,
+			moduleValueType* oMean,
+            unsigned sampleCount,
 			unsigned featureSize
 		)
 		{
 			//shape: [sampleCount, featureSize] -> [[gridDim.y, blockDim.y], [gridDim.x, blockDim.x]]
 			//idx = sampleIdx * featureSize + featureIdx
-			const unsigned by = blockIdx.y;
+			const unsigned ty = threadIdx.y;
 			const unsigned tx = threadIdx.x;
-
 			const unsigned featureIdx = blockIdx.x * blockDim.x + tx;
+            const unsigned batchIdx = blockIdx.y * blockDim.y + ty;
+            const unsigned sharedIdx = ty * blockDim.x + tx;
 
-			extern __shared__ float sharedReduceMeanData[];
+			extern __shared__ moduleValueType sharedReduceMeanData[];
 
-			sharedReduceMeanData[tx] = 0.f;
-			if (featureIdx >= featureSize)
+            //[4, 256]
+            //sharedReduceMeanData[blockDim.y][blockDim.x]    ty * blockDim.x + tx = i
+			sharedReduceMeanData[sharedIdx] = 0.f;
+			if (featureIdx >= featureSize || batchIdx >= sampleCount)
 				return;
 
-			sharedReduceMeanData[tx] = iFeat[by * featureSize + featureIdx];
+			sharedReduceMeanData[sharedIdx] = iFeat[batchIdx * featureSize + featureIdx];
 
 			__syncthreads();
 
 			if constexpr (blockSizeX >= 1024)
 			{
-				if (tx < 512) sharedReduceMeanData[tx] += sharedReduceMeanData[tx + 512];
+				if (tx < 512) sharedReduceMeanData[sharedIdx] += sharedReduceMeanData[sharedIdx + 512];
 				__syncthreads();
 			}
 			if constexpr (blockSizeX >= 512)
 			{
-				if (tx < 256) sharedReduceMeanData[tx] += sharedReduceMeanData[tx + 256];
+				if (tx < 256) sharedReduceMeanData[sharedIdx] += sharedReduceMeanData[sharedIdx + 256];
 				__syncthreads();
 			}
 			if constexpr (blockSizeX >= 256)
 			{
-				if (tx < 128) sharedReduceMeanData[tx] += sharedReduceMeanData[tx + 128];
+				if (tx < 128) sharedReduceMeanData[sharedIdx] += sharedReduceMeanData[sharedIdx + 128];
 				__syncthreads();
 			}
 			if constexpr (blockSizeX >= 128)
 			{
-				if (tx < 64) sharedReduceMeanData[tx] += sharedReduceMeanData[tx + 64];
+				if (tx < 64) sharedReduceMeanData[sharedIdx] += sharedReduceMeanData[sharedIdx + 64];
 				__syncthreads();
 			}
 			if (tx < 32)
 			{
-				if constexpr (blockSizeX >= 64) sharedReduceMeanData[tx] += sharedReduceMeanData[tx + 32];
-				if constexpr (blockSizeX >= 32) sharedReduceMeanData[tx] += sharedReduceMeanData[tx + 16];
-				if constexpr (blockSizeX >= 16) sharedReduceMeanData[tx] += sharedReduceMeanData[tx + 8];
-				if constexpr (blockSizeX >= 8) sharedReduceMeanData[tx] += sharedReduceMeanData[tx + 4];
-				if constexpr (blockSizeX >= 4) sharedReduceMeanData[tx] += sharedReduceMeanData[tx + 2];
-				if constexpr (blockSizeX >= 2) sharedReduceMeanData[tx] += sharedReduceMeanData[tx + 1];
-				if (tx == 0) atomicAdd(oMean + by, sharedReduceMeanData[0] / float(featureSize));
+				if constexpr (blockSizeX >= 64)
+				{
+					sharedReduceMeanData[sharedIdx] += sharedReduceMeanData[sharedIdx + 32];
+					__syncthreads();
+				}
+				if constexpr (blockSizeX >= 32)
+				{
+					sharedReduceMeanData[sharedIdx] += sharedReduceMeanData[sharedIdx + 16];
+					__syncthreads();
+				}
+				if constexpr (blockSizeX >= 16)
+				{
+					sharedReduceMeanData[sharedIdx] += sharedReduceMeanData[sharedIdx + 8];
+					__syncthreads();
+				}
+				if constexpr (blockSizeX >= 8)
+				{
+					sharedReduceMeanData[sharedIdx] += sharedReduceMeanData[sharedIdx + 4];
+					__syncthreads();
+				}
+				if constexpr (blockSizeX >= 4)
+				{
+					sharedReduceMeanData[sharedIdx] += sharedReduceMeanData[sharedIdx + 2];
+					__syncthreads();
+				}
+				if constexpr (blockSizeX >= 2)
+				{
+					sharedReduceMeanData[sharedIdx] += sharedReduceMeanData[sharedIdx + 1];
+					__syncthreads();
+				}
+				if (tx == 0) atomicAdd(oMean + batchIdx, sharedReduceMeanData[(ptrdiff_t)ty * blockDim.x] / moduleValueType(featureSize));
 			}
 		}
 
 		template <unsigned blockSizeX>
 		static __global__ void layerReduceVarKernel(
-			const float* iFeat,
-			const float* iMean,
-			float* oVar,
+			const moduleValueType* iFeat,
+			const moduleValueType* iMean,
+			moduleValueType* oVar,
+            unsigned sampleCount,
 			unsigned featureSize
 		)
 		{
 			//shape: [sampleCount, featureSize] -> [[gridDim.y, blockDim.y], [gridDim.x, blockDim.x]]
 			//idx = sampleIdx * featureSize + featureIdx
-			const unsigned by = blockIdx.y;
-			const unsigned tx = threadIdx.x;
+            const unsigned ty = threadIdx.y;
+            const unsigned tx = threadIdx.x;
+            const unsigned featureIdx = blockIdx.x * blockDim.x + tx;
+            const unsigned batchIdx = blockIdx.y * blockDim.y + ty;
+            const unsigned sharedIdx = ty * blockDim.x + tx;
 
-			const unsigned featureIdx = blockIdx.x * blockDim.x + tx;
+			extern __shared__ moduleValueType sharedReduceVarData[];
 
-			extern __shared__ float sharedReduceVarData[];
-
-			sharedReduceVarData[tx] = 0.f;
-			if (featureIdx >= featureSize)
-				return;
+            sharedReduceVarData[sharedIdx] = 0.f;
+            if (featureIdx >= featureSize || batchIdx >= sampleCount)
+                return;
 
 			{
-				const float x = iFeat[by * featureSize + featureIdx] - iMean[by];
-				sharedReduceVarData[tx] = x * x;
+				const moduleValueType x = iFeat[batchIdx * featureSize + featureIdx] - iMean[batchIdx];
+				sharedReduceVarData[sharedIdx] = x * x;
 				__syncthreads();
 			}
 
 			if constexpr (blockSizeX >= 1024)
 			{
-				if (tx < 512) sharedReduceVarData[tx] += sharedReduceVarData[tx + 512];
+				if (tx < 512) sharedReduceVarData[sharedIdx] += sharedReduceVarData[sharedIdx + 512];
 				__syncthreads();
 			}
 			if constexpr (blockSizeX >= 512)
 			{
-				if (tx < 256) sharedReduceVarData[tx] += sharedReduceVarData[tx + 256];
+				if (tx < 256) sharedReduceVarData[sharedIdx] += sharedReduceVarData[sharedIdx + 256];
 				__syncthreads();
 			}
 			if constexpr (blockSizeX >= 256)
 			{
-				if (tx < 128) sharedReduceVarData[tx] += sharedReduceVarData[tx + 128];
+				if (tx < 128) sharedReduceVarData[sharedIdx] += sharedReduceVarData[sharedIdx + 128];
 				__syncthreads();
 			}
 			if constexpr (blockSizeX >= 128)
 			{
-				if (tx < 64) sharedReduceVarData[tx] += sharedReduceVarData[tx + 64];
+				if (tx < 64) sharedReduceVarData[sharedIdx] += sharedReduceVarData[sharedIdx + 64];
 				__syncthreads();
 			}
 			if (tx < 32)
 			{
-				if constexpr (blockSizeX >= 64) sharedReduceVarData[tx] += sharedReduceVarData[tx + 32];
-				if constexpr (blockSizeX >= 32) sharedReduceVarData[tx] += sharedReduceVarData[tx + 16];
-				if constexpr (blockSizeX >= 16) sharedReduceVarData[tx] += sharedReduceVarData[tx + 8];
-				if constexpr (blockSizeX >= 8) sharedReduceVarData[tx] += sharedReduceVarData[tx + 4];
-				if constexpr (blockSizeX >= 4) sharedReduceVarData[tx] += sharedReduceVarData[tx + 2];
-				if constexpr (blockSizeX >= 2) sharedReduceVarData[tx] += sharedReduceVarData[tx + 1];
-				if (tx == 0) atomicAdd(oVar + by, sharedReduceVarData[0] / float(featureSize));
+				if constexpr (blockSizeX >= 64)
+				{
+					sharedReduceVarData[sharedIdx] += sharedReduceVarData[sharedIdx + 32];
+					__syncthreads();
+				}
+				if constexpr (blockSizeX >= 32)
+				{
+					sharedReduceVarData[sharedIdx] += sharedReduceVarData[sharedIdx + 16];
+					__syncthreads();
+				}
+				if constexpr (blockSizeX >= 16)
+				{
+					sharedReduceVarData[sharedIdx] += sharedReduceVarData[sharedIdx + 8];
+					__syncthreads();
+				}
+				if constexpr (blockSizeX >= 8)
+				{
+					sharedReduceVarData[sharedIdx] += sharedReduceVarData[sharedIdx + 4];
+					__syncthreads();
+				}
+				if constexpr (blockSizeX >= 4)
+				{
+					sharedReduceVarData[sharedIdx] += sharedReduceVarData[sharedIdx + 2];
+					__syncthreads();
+				}
+				if constexpr (blockSizeX >= 2)
+				{
+					sharedReduceVarData[sharedIdx] += sharedReduceVarData[sharedIdx + 1];
+					__syncthreads();
+				}
+                if (tx == 0) atomicAdd(oVar + batchIdx, sharedReduceVarData[(ptrdiff_t)ty * blockDim.x] / moduleValueType(featureSize));
 			}
 		}
 
         static __global__ void implNormalizeKernel(
-            float* ioFeat,
-            const float* iMean,
-            const float* iVar,
+            moduleValueType* ioFeat,
+            const moduleValueType* iMean,
+            const moduleValueType* iVar,
+            unsigned sampleCount,
             unsigned featureSize,
-            float eps
+            moduleValueType eps
         )
         {
+            const unsigned ty = threadIdx.y;
             const unsigned tx = threadIdx.x;
-            unsigned x = blockIdx.x * blockDim.x + tx;
 
-            if (x >= featureSize)
+            const unsigned y = blockIdx.y * blockDim.y + ty;
+            const unsigned x = blockIdx.x * blockDim.x + tx;
+
+            if (x >= featureSize || y >= sampleCount)
 	            return;
 
-            __shared__ float implNormalizeSharedMem[2];
+            extern __shared__ moduleValueType implNormalizeSharedMem[];
+
+            auto implNormalizeShared = implNormalizeSharedMem + 2ll * ty;
 
             if (threadIdx.x == 0)
             {
-                implNormalizeSharedMem[0] = iMean[blockIdx.y];
-                implNormalizeSharedMem[1] = sqrtf(iVar[blockIdx.y] + eps);
+                implNormalizeShared[0] = iMean[y];
+                implNormalizeShared[1] = sqrtf(iVar[y] + eps);
             }
 
             __syncthreads();
 
-            auto idx = blockIdx.y * featureSize + x;
-            ioFeat[idx] = (ioFeat[idx] - implNormalizeSharedMem[0]) / implNormalizeSharedMem[1];
+            auto idx = y * featureSize + x;
+            ioFeat[idx] = (ioFeat[idx] - implNormalizeShared[0]) / implNormalizeShared[1];
         }
 
 		static void inplaceNorm(
-			float* ioFeat,
-			float* ioMean,
-			float* ioVar,
+			moduleValueType* ioFeat,
+			moduleValueType* ioMean,
+			moduleValueType* ioVar,
 			unsigned sampleCount,
 			unsigned featureSize,
-			float eps,
+			moduleValueType eps,
 			cudaStream_t cudaStream
 		)
 		{
-			{
-                cudaMemsetAsync(ioMean, 0, sizeof(float) * sampleCount, cudaStream);
-                cudaMemsetAsync(ioVar, 0, sizeof(float) * sampleCount, cudaStream);
+            cudaMemsetAsync(ioMean, 0, sizeof(moduleValueType) * sampleCount, cudaStream);
+            cudaMemsetAsync(ioVar, 0, sizeof(moduleValueType) * sampleCount, cudaStream);
 
-				dim3 blockSize(DRAGONIANLIB_CUDA_BLOCK_SIZE);
-				dim3 gridSize(
-					(featureSize + blockSize.x - 1) / blockSize.x,
-					sampleCount
+            dim3 blockSize(DRAGONIANLIB_CUDA_BLOCK_SIZE / 4, 4);
+            dim3 gridSize(
+                (featureSize + blockSize.x - 1) / blockSize.x,
+                (sampleCount + blockSize.y - 1) / blockSize.y
+            );
+
+			constexpr auto sharedMemSize = DRAGONIANLIB_CUDA_BLOCK_SIZE * sizeof(moduleValueType);
+
+			layerReduceMeanKernel<DRAGONIANLIB_CUDA_BLOCK_SIZE / 4><<<gridSize, blockSize, sharedMemSize, cudaStream>>>(
+				ioFeat,
+				ioMean,
+                sampleCount,
+				featureSize
 				);
 
-				constexpr auto sharedMemSize = DRAGONIANLIB_CUDA_BLOCK_SIZE * sizeof(float);
+			layerReduceVarKernel<DRAGONIANLIB_CUDA_BLOCK_SIZE / 4><<<gridSize, blockSize, sharedMemSize, cudaStream>>>(
+				ioFeat,
+				ioMean,
+                ioVar,
+                sampleCount,
+				featureSize
+				);
 
-				layerReduceMeanKernel<DRAGONIANLIB_CUDA_BLOCK_SIZE><<<gridSize, blockSize, sharedMemSize, cudaStream>>>(
-					ioFeat,
-					ioMean,
-					featureSize
-					);
-
-				layerReduceVarKernel<DRAGONIANLIB_CUDA_BLOCK_SIZE><<<gridSize, blockSize, sharedMemSize, cudaStream>>>(
-					ioFeat,
-					ioMean,
-                    ioVar,
-					featureSize
-					);
-			}
-
-			dim3 blockSize(DRAGONIANLIB_CUDA_BLOCK_SIZE);
-			dim3 gridSize(
-				(featureSize + blockSize.x - 1) / blockSize.x,
-				sampleCount
-			);
-			implNormalizeKernel<<<gridSize, blockSize, 8, cudaStream>>>(
+			implNormalizeKernel<<<gridSize, blockSize, sharedMemSize, cudaStream>>>(
 				ioFeat, 
 				ioMean,
                 ioVar,
+                sampleCount,
 				featureSize,
 				eps
 				);
 		}
 
         static __global__ void implAffineKernel(
-            float* output,
-            const float* weight,
+            moduleValueType* output,
+            const moduleValueType* weight,
             unsigned batchSize,
             unsigned numChannel
         )
@@ -325,7 +814,7 @@ namespace DragonianLib
             unsigned y = blockIdx.y * blockDim.y + ty;
             unsigned x = blockIdx.x * blockDim.x + tx;
 
-            extern __shared__ float implAffineSharedMem[];
+            extern __shared__ moduleValueType implAffineSharedMem[];
 
             if (y >= batchSize || x >= numChannel)
                 return;
@@ -339,9 +828,9 @@ namespace DragonianLib
         }
 
         static __global__ void implAffineBiasKernel(
-            float* output,
-            const float* weight,
-            const float* bias,
+            moduleValueType* output,
+            const moduleValueType* weight,
+            const moduleValueType* bias,
             unsigned batchSize,
             unsigned numChannel
         )
@@ -352,7 +841,7 @@ namespace DragonianLib
             unsigned y = blockIdx.y * blockDim.y + ty;
             unsigned x = blockIdx.x * blockDim.x + tx;
 
-            extern __shared__ float implAffineBiasSharedMem[];
+            extern __shared__ moduleValueType implAffineBiasSharedMem[];
 
             if (y >= batchSize || x >= numChannel)
                 return;
@@ -370,9 +859,9 @@ namespace DragonianLib
         }
 
         static __global__ void implAffineBias2DKernel(
-            float* output,
-            const float* weight,
-            const float* bias,
+            moduleValueType* output,
+            const moduleValueType* weight,
+            const moduleValueType* bias,
             unsigned numChannel,
             unsigned featureSize
         )
@@ -383,7 +872,7 @@ namespace DragonianLib
             unsigned y = blockIdx.y * blockDim.y + ty;
             unsigned x = blockIdx.x * blockDim.x + tx;
 
-            extern __shared__ float implAffineBias2DSharedMem[];
+            extern __shared__ moduleValueType implAffineBias2DSharedMem[];
 
             if (y >= numChannel || x >= featureSize)
                 return;
@@ -401,8 +890,8 @@ namespace DragonianLib
         }
 
         static __global__ void implBias2DKernel(
-            float* output,
-            const float* bias,
+            moduleValueType* output,
+            const moduleValueType* bias,
             unsigned numChannel,
             unsigned featureSize
         )
@@ -413,7 +902,7 @@ namespace DragonianLib
             unsigned y = blockIdx.y * blockDim.y + ty;
             unsigned x = blockIdx.x * blockDim.x + tx;
 
-            extern __shared__ float implBias2DSharedMem[];
+            extern __shared__ moduleValueType implBias2DSharedMem[];
 
             if (y >= numChannel || x >= featureSize)
                 return;
@@ -435,18 +924,18 @@ namespace DragonianLib
         ) : Module(parent, name), InFeatureDim(inFeatureDim), OutFeatureDim(outFeatureDim), BiasEnabled(bias)
         {
             Weight = std::make_shared<Parameter>(
-                this, "weight", Tensor<float>(OutFeatureDim, InFeatureDim)
+                this, "weight", Tensor<moduleValueType>(OutFeatureDim, InFeatureDim)
             );
             if (BiasEnabled)
                 Bias = std::make_shared<Parameter>(
-                    this, "bias", Tensor<float>(OutFeatureDim)
+                    this, "bias", Tensor<moduleValueType>(OutFeatureDim)
                 );
         }
 
         layerStatus_t Linear::Forward(
-            const Tensor<float>& input,
-            Tensor<float>& output
-        ) const noexcept
+            const Tensor<moduleValueType>& input,
+            Tensor<moduleValueType>& output
+        ) const noexcept try
         {
 #if DRAGONIANLIB_CUDA_EP_BENCHMARK
 			auto __BENCH_TM_BEG = Timer("Linear " + Name, &output.Handle);
@@ -468,8 +957,8 @@ namespace DragonianLib
             if (output.Handle) CudaProvider::asyncCudaStream(getHandleStream(output.Handle));
             output.Handle = input.Handle;
 
-            static constexpr float Alpha = 1.f;
-            static constexpr float Beta = 0.f;
+            static constexpr moduleValueType Alpha = 1.f;
+            static constexpr moduleValueType Beta = 0.f;
 
             if (auto Ret = cublasSgemm(
                 cublasHandle_t(input.Handle), CUBLAS_OP_T, CUBLAS_OP_N,
@@ -488,19 +977,24 @@ namespace DragonianLib
                     (OutFeatureDim + blockSize.x - 1) / blockSize.x,
                     (inputSize + blockSize.y - 1) / blockSize.y
                 );
-                unsigned sharedMemSize = blockSize.x * sizeof(float);
+                unsigned sharedMemSize = blockSize.x * sizeof(moduleValueType);
                 broadcastAddKernel<<<gridSize, blockSize, sharedMemSize, cudaStream_t(getHandleStream(input.Handle))>>>
                     (output.Data, Bias->GetTensor().Data, inputSize, OutFeatureDim);
             }
 
             return LAYER_STATUS_SUCCESS;
         }
+        catch (std::exception& except)
+        {
+            CudaProvider::__LastError = except.what();
+            return LAYER_STATUS_FATAL_ERROR;
+        }
 
         LayerNorm1D::LayerNorm1D(
             Module* parent,
             const std::string& name,
             unsigned numChannels,
-            float eps,
+            moduleValueType eps,
             bool affine,
             bool bias
         ) : Module(parent, name), NumChannels(numChannels), Epsilon(eps), BiasEnabled(bias), AffineEnabled(affine)
@@ -508,21 +1002,21 @@ namespace DragonianLib
             if (AffineEnabled)
             {
                 Weight = std::make_shared<Parameter>(
-                    this, "weight", Tensor<float>(numChannels)
+                    this, "weight", Tensor<moduleValueType>(numChannels)
                 );
                 if (BiasEnabled)
                     Bias = std::make_shared<Parameter>(
-                        this, "bias", Tensor<float>(numChannels)
+                        this, "bias", Tensor<moduleValueType>(numChannels)
                     );
             }
         }
 
         layerStatus_t LayerNorm1D::Forward(
             // ReSharper disable once CppParameterMayBeConstPtrOrRef
-            Tensor<float>& output,
-            Tensor<float>& mean,
-            Tensor<float>& var
-        ) const noexcept
+            Tensor<moduleValueType>& output,
+            Tensor<moduleValueType>& mean,
+            Tensor<moduleValueType>& var
+        ) const noexcept try
         {
 #if DRAGONIANLIB_CUDA_EP_BENCHMARK
 			auto __BENCH_TM_BEG = Timer("LayerNorm1D " + Name, &output.Handle);
@@ -559,7 +1053,7 @@ namespace DragonianLib
                     (NumChannels + blockSize.x - 1) / blockSize.x,
                     (sampleCountNorm + blockSize.y - 1) / blockSize.y
                 );
-                unsigned sharedMemSize = blockSize.x * 2ull * sizeof(float);
+                unsigned sharedMemSize = blockSize.x * 2ull * sizeof(moduleValueType);
 	            if (BiasEnabled)
                     implAffineBiasKernel<<<gridSize, blockSize, sharedMemSize, Stream>>>
 						(output.Data, Weight->GetTensor().Data, Bias->GetTensor().Data, sampleCountNorm, NumChannels);
@@ -570,13 +1064,18 @@ namespace DragonianLib
 
             return LAYER_STATUS_SUCCESS;
         }
+        catch (std::exception& except)
+        {
+            CudaProvider::__LastError = except.what();
+            return LAYER_STATUS_FATAL_ERROR;
+        }
 
         GroupNorm1D::GroupNorm1D(
             Module* parent,
             const std::string& name,
             unsigned numGroups,
             unsigned numChannels,
-            float eps,
+            moduleValueType eps,
             bool affine
         ) : Module(parent, name), NumGroups(numGroups), NumChannels(numChannels), Epsilon(eps), AffineEnabled(affine)
         {
@@ -586,20 +1085,20 @@ namespace DragonianLib
             if (AffineEnabled)
             {
                 Weight = std::make_shared<Parameter>(
-                    this, "weight", Tensor<float>(numChannels)
+                    this, "weight", Tensor<moduleValueType>(numChannels)
                 );
                 Bias = std::make_shared<Parameter>(
-                    this, "bias", Tensor<float>(numChannels)
+                    this, "bias", Tensor<moduleValueType>(numChannels)
                 );
             }
         }
 
         layerStatus_t GroupNorm1D::Forward(
 	        // ReSharper disable once CppParameterMayBeConstPtrOrRef
-	        Tensor<float>& output,
-            Tensor<float>& mean,
-            Tensor<float>& var
-        ) const noexcept
+	        Tensor<moduleValueType>& output,
+            Tensor<moduleValueType>& mean,
+            Tensor<moduleValueType>& var
+        ) const noexcept try
         {
 #if DRAGONIANLIB_CUDA_EP_BENCHMARK
 			auto __BENCH_TM_BEG = Timer("GroupNorm1D " + Name, &output.Handle);
@@ -641,7 +1140,7 @@ namespace DragonianLib
                     (NumChannels + blockSizeSp.y - 1) / blockSizeSp.y,
                     batchSize
                 );
-                unsigned sharedMemSize = blockSizeSp.y * 2ull * sizeof(float);
+                unsigned sharedMemSize = blockSizeSp.y * 2ull * sizeof(moduleValueType);
 	            implAffineBias2DKernel<<<gridSizeSp, blockSizeSp, sharedMemSize, Stream>>>(
                     output.Data,
                     Weight->GetTensor().Data,
@@ -653,11 +1152,16 @@ namespace DragonianLib
 
             return LAYER_STATUS_SUCCESS;
         }
+        catch (std::exception& except)
+        {
+            CudaProvider::__LastError = except.what();
+            return LAYER_STATUS_FATAL_ERROR;
+        }
 
         static __global__ void leakyReLUKernel(
-            const float* input,
-            float* output,
-            const float negativeSlope,
+            const moduleValueType* input,
+            moduleValueType* output,
+            const moduleValueType negativeSlope,
             const unsigned size)
     	{
             const unsigned index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -667,8 +1171,8 @@ namespace DragonianLib
 
         layerStatus_t LeakyReLU::Forward(
 	        // ReSharper disable once CppParameterMayBeConstPtrOrRef
-	        Tensor<float>& output
-        ) const noexcept
+	        Tensor<moduleValueType>& output
+        ) const noexcept try
         {
 #if DRAGONIANLIB_CUDA_EP_BENCHMARK
 			auto __BENCH_TM_BEG = Timer("LeakyReLU", &output.Handle);
@@ -684,6 +1188,11 @@ namespace DragonianLib
 
             return LAYER_STATUS_SUCCESS;
         }
+        catch (std::exception& except)
+        {
+            CudaProvider::__LastError = except.what();
+            return LAYER_STATUS_FATAL_ERROR;
+        }
 
         Conv1D::Conv1D(
             Module* parent, const std::string& name,
@@ -692,20 +1201,27 @@ namespace DragonianLib
             bool bias
         ) : Module(parent, name), KernelSize(kernelSize), Stride(stride), Padding(padding), Dilation(dilation), Groups(groups), InputChannels(inputChannels), OutputChannels(outputChannels), BiasEnabled(bias)
         {
+            if (inputChannels % groups)
+                throw std::logic_error("InputChannels must be exactly divisible by Groups");
+            if (outputChannels % groups)
+                throw std::logic_error("OutputChannels must be exactly divisible by Groups");
+
+            IsContiguous = KernelSize == 1 && Stride == 1 && Padding == 0 && Dilation == 1;
+            UseGemm = IsContiguous && Groups == 1;
+            IsDwConv = InputChannels == OutputChannels && Groups == InputChannels;
+
             Weight = std::make_shared<Parameter>(
-                this, "weight", Tensor<float>(outputChannels, inputChannels / groups, kernelSize)
+                this, "weight", Tensor<moduleValueType>(outputChannels, inputChannels / groups, kernelSize)
             );
             if (BiasEnabled)
                 Bias = std::make_shared<Parameter>(
-                    this, "bias", Tensor<float>(outputChannels)
+                    this, "bias", Tensor<moduleValueType>(outputChannels)
                 );
         }
 
         static __global__ void im2ColKernel(
-            const float* input,
-            float* output,
-            unsigned groups,
-            unsigned groupSize,
+            const moduleValueType* input,
+            moduleValueType* output,
             unsigned inputLength,
             unsigned im2ColChannels,
             unsigned outputLength,
@@ -717,21 +1233,25 @@ namespace DragonianLib
         {
 			//im2ColChannels = groupSize * kernelSize, groupSize = inputChannel / groups
             //[batchSize, groups, groupSize, inputLength] ->  [batchSize, groups, im2ColChannels, outputLength]
-            const unsigned bg = blockIdx.z;
+
+            //unsigned bg = blockIdx.y;
             const unsigned outCh = blockIdx.y * blockDim.y + threadIdx.y;
             const unsigned outPos = blockIdx.x * blockDim.x + threadIdx.x;
             if (outCh >= im2ColChannels || outPos >= outputLength)
 				return;
-            
-            const unsigned batchIdx = bg / groups;
-            const unsigned gIdx = bg % groups;
+        	
+            //const unsigned batchIdx = bg / groups;
+            //const unsigned gIdx = bg % groups;
 
             const unsigned gcIdx = outCh / kernelSize;
             const unsigned kernelOffset = outCh % kernelSize;
 
 			const int inPos = int(outPos * stride) - int(padding) + int(kernelOffset * dilation);
-            const unsigned oPos = ((batchIdx * groups + gIdx) * im2ColChannels + outCh) * outputLength + outPos;
-            const unsigned iPos = ((batchIdx * groups + gIdx) * groupSize + gcIdx) * inputLength + inPos;
+            //const unsigned oPos = ((batchIdx * groups + gIdx) * im2ColChannels + outCh) * outputLength + outPos;
+            //const unsigned iPos = ((batchIdx * groups + gIdx) * groupSize + gcIdx) * inputLength + inPos;
+            const unsigned oPos = outCh * outputLength + outPos;
+            const unsigned iPos = gcIdx * inputLength + inPos;
+
             if (inPos >= 0 && inPos < int(inputLength))
                 output[oPos] = input[iPos];
             else
@@ -739,10 +1259,10 @@ namespace DragonianLib
         }
 
         layerStatus_t Conv1D::Forward(
-            const Tensor<float>& input,
-            Tensor<float>& output,
-            Tensor<float>& col
-        ) const noexcept
+            const Tensor<moduleValueType>& input,
+            Tensor<moduleValueType>& output,
+            Tensor<moduleValueType>& col
+        ) const noexcept try
         {
 #if DRAGONIANLIB_CUDA_EP_BENCHMARK
 			auto __BENCH_TM_BEG = Timer("Conv1D " + Name, &output.Handle);
@@ -763,20 +1283,16 @@ namespace DragonianLib
             output.Handle = input.Handle;
 
             const unsigned im2ColChannels = iGroupSize * KernelSize;
-            col.Resize(batchSize, Groups, outputLength, im2ColChannels);
+            col.Resize(outputLength, im2ColChannels);
             if (col.Handle) CudaProvider::asyncCudaStream(getHandleStream(col.Handle));
             col.Handle = input.Handle;
 
             cudaStream_t Stream = cudaStream_t(getHandleStream(input.Handle));
 
-            static constexpr float Alpha = 1.f;
-            static constexpr float Beta = 0.f;
+            static constexpr moduleValueType Alpha = 1.f;
+            static constexpr moduleValueType Beta = 0.f;
 
-            if (KernelSize == 1&&
-                Stride == 1 &&
-                Padding == 0 &&
-                Dilation == 1 &&
-                Groups == 1)
+            if (UseGemm)
             {
 				//[BatchSize, InputChannels, InputLength/OutputLength, 1]^T * [1, OutputChannels, InputChannels, 1]^T
                 if (auto Ret = cublasSgemmStridedBatched(
@@ -795,11 +1311,10 @@ namespace DragonianLib
 	            dim3 blockSize(DRAGONIANLIB_CUDA_BLOCK_SIZE / 32, 32);
                 dim3 gridSize(
                     (outputLength + blockSize.x - 1) / blockSize.x,
-                    (im2ColChannels + blockSize.y - 1) / blockSize.y,
-                    batchSize * Groups
+                    (im2ColChannels + blockSize.y - 1) / blockSize.y
                 );
 
-	            im2ColKernel<<<gridSize, blockSize, 0, Stream>>>(
+	            /*im2ColKernel<<<gridSize, blockSize, 0, Stream>>>(
 	                input.Data,
 	                col.Data,
 	                Groups,
@@ -811,24 +1326,55 @@ namespace DragonianLib
 	                Stride,
 	                Padding,
 	                Dilation
-					);
+					);*/
 
 				//[batchSize, Groups, Im2ColChannels, OutputLength]^T * [1, Groups, oGroupSize, Im2ColChannels]^T
 				//[batchSize, InputChannels, OutputLength]^T * [1, OutputChannels, InputChannels, KernelSize]^T
 				//[batchSize, Groups, oGroupSize, OutputLength]^T
                 for (unsigned b = 0; b < batchSize; ++b)
-                    if (auto Ret = cublasSgemmStridedBatched(
-                        cublasHandle_t(col.Handle), CUBLAS_OP_N, CUBLAS_OP_N,
-                        (int)outputLength, (int)oGroupSize, (int)im2ColChannels,
-                        &Alpha,
-                        col.Data + (ptrdiff_t)Groups * im2ColChannels * outputLength * b, (int)outputLength,
-                        (ptrdiff_t)im2ColChannels * outputLength,
-                        Weight->GetTensor().Data, (int)im2ColChannels, (ptrdiff_t)oGroupSize * im2ColChannels,
-                        &Beta,
-                        output.Data + (ptrdiff_t)OutputChannels * outputLength * b, (int)outputLength,
-                        (ptrdiff_t)oGroupSize * outputLength,
-                        (int)Groups
-                    )) return static_cast<layerStatus_t>(Ret);
+                    for (unsigned g = 0; g < Groups; ++g)
+                    {
+						//const unsigned iPos = ((b * Groups + g) * groupSize + 0) * inputLength + 0;
+                        //const unsigned oPos = ((b * Groups + g) * im2ColChannels + 0) * outputLength + 0;
+						const auto iPtr = input.Data + 
+                            ptrdiff_t(b * Groups + g) * iGroupSize * inputLength;
+                        im2ColKernel<<<gridSize, blockSize, 0, Stream>>>(
+                            iPtr,
+			                col.Data,
+			                inputLength,
+			                im2ColChannels,
+			                outputLength,
+			                KernelSize,
+			                Stride,
+			                Padding,
+			                Dilation
+						);
+                        const auto oPtr = output.Data +
+                            ptrdiff_t(b * Groups + g) * oGroupSize * outputLength;
+                        const auto wPtr = Weight->GetTensor().Data +
+							ptrdiff_t(g) * oGroupSize * im2ColChannels;
+                        if (auto Ret = cublasSgemm(
+                            cublasHandle_t(col.Handle), CUBLAS_OP_N, CUBLAS_OP_N,
+                            (int)outputLength, (int)oGroupSize, (int)im2ColChannels,
+                            &Alpha,
+                            col.Data, (int)outputLength,
+                            wPtr, (int)im2ColChannels,
+                            &Beta,
+                            oPtr, (int)outputLength
+                        )) return static_cast<layerStatus_t>(Ret);
+					}
+                /*if (auto Ret = cublasSgemmStridedBatched(
+                    cublasHandle_t(col.Handle), CUBLAS_OP_N, CUBLAS_OP_N,
+                    (int)outputLength, (int)oGroupSize, (int)im2ColChannels,
+                    &Alpha,
+                    col.Data + (ptrdiff_t)Groups * im2ColChannels * outputLength * b, (int)outputLength,
+                    (ptrdiff_t)im2ColChannels * outputLength,
+                    Weight->GetTensor().Data, (int)im2ColChannels, (ptrdiff_t)oGroupSize * im2ColChannels,
+                    &Beta,
+                    output.Data + (ptrdiff_t)OutputChannels * outputLength * b, (int)outputLength,
+                    (ptrdiff_t)oGroupSize * outputLength,
+                    (int)Groups
+                )) return static_cast<layerStatus_t>(Ret);*/
             }
 
             //const unsigned iGroupSize = InputChannels / Groups;
@@ -836,14 +1382,14 @@ namespace DragonianLib
             //const unsigned im2ColChannels = iGroupSize * KernelSize;
             //[batchSize, Groups, outputLength, im2ColChannels] * [Groups, oGroupSize, im2ColChannels]
             //[batchSize, Groups, oGroupSize, outputLength] -> [batchSize, OutputChannels, outputLength]
-            /*static constexpr float Alpha = 1.f;
-            static constexpr float Beta = 0.f;
+            /*static constexpr moduleValueType Alpha = 1.f;
+            static constexpr moduleValueType Beta = 0.f;
             for (unsigned b = 0; b < 1; ++b)
                 for (unsigned g = 0; g < 1; ++g)
                 {
-                    const float* A = Weight->GetTensor().Data + (ptrdiff_t)g * oGroupSize * im2ColChannels;
-                    const float* B = col.Data + ptrdiff_t(b * Groups + g) * outputLength * im2ColChannels;
-                    float* C = output.Data + ptrdiff_t(b * Groups + g) * oGroupSize * outputLength;
+                    const moduleValueType* A = Weight->GetTensor().Data + (ptrdiff_t)g * oGroupSize * im2ColChannels;
+                    const moduleValueType* B = col.Data + ptrdiff_t(b * Groups + g) * outputLength * im2ColChannels;
+                    moduleValueType* C = output.Data + ptrdiff_t(b * Groups + g) * oGroupSize * outputLength;
                     if (auto Ret = cublasSgemm(
                         cublasHandle_t(input.Handle),
                         CUBLAS_OP_T,
@@ -870,7 +1416,7 @@ namespace DragonianLib
                     (OutputChannels + blockSizeSp.y - 1) / blockSizeSp.y,
                     batchSize
                 );
-                unsigned sharedMemSize = blockSizeSp.y * sizeof(float);
+                unsigned sharedMemSize = blockSizeSp.y * sizeof(moduleValueType);
 	            implBias2DKernel<<<gridSizeSp, blockSizeSp, sharedMemSize, Stream>>>(
                     output.Data,
                     Bias->GetTensor().Data,
@@ -881,10 +1427,15 @@ namespace DragonianLib
 
             return LAYER_STATUS_SUCCESS;
         }
+        catch (std::exception& except)
+        {
+            CudaProvider::__LastError = except.what();
+            return LAYER_STATUS_FATAL_ERROR;
+        }
 
         static __global__ void implInplaceAddKernel(
-            float* output,
-            const float* input,
+            moduleValueType* output,
+            const moduleValueType* input,
             const unsigned size
         )
         {
@@ -895,9 +1446,9 @@ namespace DragonianLib
 
         layerStatus_t AddTensor(
 	        // ReSharper disable once CppParameterMayBeConstPtrOrRef
-	        Tensor<float>& output,
-            const Tensor<float>& input
-        )
+	        Tensor<moduleValueType>& output,
+            const Tensor<moduleValueType>& input
+        ) noexcept try
         {
 #if DRAGONIANLIB_CUDA_EP_BENCHMARK
 			auto __BENCH_TM_BEG = Timer("Add", &output.Handle);
@@ -925,15 +1476,20 @@ namespace DragonianLib
 
             return LAYER_STATUS_SUCCESS;
         }
+        catch (std::exception& except)
+        {
+            CudaProvider::__LastError = except.what();
+            return LAYER_STATUS_FATAL_ERROR;
+        }
 
-        static __device__ float sigmoid(float x)
+        static __device__ moduleValueType sigmoid(moduleValueType x)
         {
             return 1.0f / (1.0f + expf(-x));
         }
 
         static __global__ void implSigmoidKernel(
-            const float* input,
-            float* output,
+            const moduleValueType* input,
+            moduleValueType* output,
             const unsigned size
         )
         {
@@ -944,8 +1500,8 @@ namespace DragonianLib
 
         layerStatus_t SigmoidTensor(
 	        // ReSharper disable once CppParameterMayBeConstPtrOrRef
-	        Tensor<float>& output
-        )
+	        Tensor<moduleValueType>& output
+        ) noexcept try
         {
 #if DRAGONIANLIB_CUDA_EP_BENCHMARK
 			auto __BENCH_TM_BEG = Timer("Sigmoid", &output.Handle);
@@ -964,11 +1520,16 @@ namespace DragonianLib
 
             return LAYER_STATUS_SUCCESS;
         }
+        catch (std::exception& except)
+        {
+            CudaProvider::__LastError = except.what();
+            return LAYER_STATUS_FATAL_ERROR;
+        }
 
         layerStatus_t Transpose::Forward(
-            const Tensor<float>& input,
-            Tensor<float>& output
-        ) noexcept
+            const Tensor<moduleValueType>& input,
+            Tensor<moduleValueType>& output
+        ) noexcept try
         {
 #if DRAGONIANLIB_CUDA_EP_BENCHMARK
 			auto __BENCH_TM_BEG = Timer("Transpose", &output.Handle);
@@ -983,17 +1544,17 @@ namespace DragonianLib
             else
                 return LAYER_STATUS_SIZE_MISMATCH;
             if (output.Handle) CudaProvider::asyncCudaStream(getHandleStream(output.Handle));
-            output.Handle = input.Handle;
+            if (input.Handle) output.Handle = input.Handle;
 
             const auto BatchSize = input.N * input.C;
             const auto BatchStride = input.H * input.W;
 
-            static constexpr float alpha = 1.f;
-            static constexpr float beta = 0.f;
+            static constexpr moduleValueType alpha = 1.f;
+            static constexpr moduleValueType beta = 0.f;
 
             for (unsigned b = 0; b < BatchSize; ++b)
                 if (auto Ret = cublasSgeam(
-                    cublasHandle_t(input.Handle),
+                    cublasHandle_t(output.Handle),
                     CUBLAS_OP_T,
                     CUBLAS_OP_T,
                     static_cast<int>(input.H),
@@ -1010,10 +1571,15 @@ namespace DragonianLib
 
             return LAYER_STATUS_SUCCESS;
         }
+        catch (std::exception& except)
+        {
+            CudaProvider::__LastError = except.what();
+            return LAYER_STATUS_FATAL_ERROR;
+        }
 
         static __global__ void implGLUKernel(
-            const float* input,
-            float* output,
+            const moduleValueType* input,
+            moduleValueType* output,
             unsigned half,
             unsigned featureSize
         )
@@ -1034,9 +1600,9 @@ namespace DragonianLib
         }
 
         layerStatus_t GLU::Forward(
-            const Tensor<float>& input,
-            Tensor<float>& output
-        ) noexcept
+            const Tensor<moduleValueType>& input,
+            Tensor<moduleValueType>& output
+        ) noexcept try
         {
 #if DRAGONIANLIB_CUDA_EP_BENCHMARK
 			auto __BENCH_TM_BEG = Timer("GLU", &output.Handle);
@@ -1074,10 +1640,15 @@ namespace DragonianLib
 
             return LAYER_STATUS_SUCCESS;
         }
+        catch (std::exception& except)
+        {
+            CudaProvider::__LastError = except.what();
+            return LAYER_STATUS_FATAL_ERROR;
+        }
 
         static __global__ void implSiLUKernel(
-            const float* input,
-            float* output,
+            const moduleValueType* input,
+            moduleValueType* output,
             const unsigned size
         )
         {
@@ -1085,15 +1656,15 @@ namespace DragonianLib
 
             if (index < size)
             {
-                float x = input[index];
+                moduleValueType x = input[index];
                 output[index] = x / (1.0f + expf(-x));
             }
         }
 
         layerStatus_t SiLU::Forward(
 	        // ReSharper disable once CppParameterMayBeConstPtrOrRef
-	        Tensor<float>& output
-        ) noexcept
+	        Tensor<moduleValueType>& output
+        ) noexcept try
         {
 #if DRAGONIANLIB_CUDA_EP_BENCHMARK
 			auto __BENCH_TM_BEG = Timer("SiLU", &output.Handle);
@@ -1112,5 +1683,11 @@ namespace DragonianLib
 
             return LAYER_STATUS_SUCCESS;
         }
+        catch (std::exception& except)
+        {
+            CudaProvider::__LastError = except.what();
+            return LAYER_STATUS_FATAL_ERROR;
+        }
+
     }
 }
