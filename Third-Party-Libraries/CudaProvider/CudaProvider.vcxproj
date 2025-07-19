@@ -31,7 +31,7 @@
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings">
-    <Import Project="$(VCTargetsPath)\BuildCustomizations\CUDA 12.5.props" />
+    <Import Project="$(VCTargetsPath)\BuildCustomizations\CUDA 12.4.props" />
   </ImportGroup>
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
@@ -44,6 +44,7 @@
     <LinkIncremental>true</LinkIncremental>
     <IncludePath>C:\Program Files\Python313\include;C:\Users\17518\AppData\Roaming\Python\Python313\site-packages\torch\include\torch/csrc/api/include/;$(IncludePath)</IncludePath>
     <LibraryPath>C:\Program Files\Python313\libs;C:\Users\17518\AppData\Roaming\Python\Python313\site-packages\torch\lib;$(LibraryPath)</LibraryPath>
+    <TargetExt>.pyd</TargetExt>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <IncludePath>C:\Program Files\Python313\include;C:\Users\17518\AppData\Roaming\Python\Python313\site-packages\torch\include;$(IncludePath)</IncludePath>
@@ -55,14 +56,18 @@
       <Optimization>Disabled</Optimization>
       <PreprocessorDefinitions>WIN32;WIN64;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <LanguageStandard>stdcpplatest</LanguageStandard>
+      <AdditionalIncludeDirectories>C:\Users\lenovo\anaconda3\include;C:\Users\lenovo\anaconda3\Lib\site-packages\pybind11\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <SubSystem>Console</SubSystem>
-      <AdditionalDependencies>cudart_static.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;cublas.lib;cufft.lib;cufftw.lib;python313.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>cudart_static.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;cublas.lib;cufft.lib;cufftw.lib;C:\Users\lenovo\anaconda3\libs\*;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
     <CudaCompile>
       <TargetMachinePlatform>64</TargetMachinePlatform>
+      <NvccCompilation>fatbin</NvccCompilation>
+      <AdditionalOptions>%(AdditionalOptions)</AdditionalOptions>
     </CudaCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -90,21 +95,23 @@
     <CudaCompile Include="binary.cu" />
     <CudaCompile Include="fcpe.cu" />
     <CudaCompile Include="kernel.cu" />
-    <CudaCompile Include="kernel.h" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="base.h" />
     <ClInclude Include="binary.h" />
     <ClInclude Include="cuFCPE.h" />
+    <ClInclude Include="cuFCPEPythonImp.h" />
     <ClInclude Include="fcpe.h" />
+    <ClInclude Include="kernel.h" />
     <ClInclude Include="npy.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="cuFCPE.cpp" />
+    <ClCompile Include="cuFCPEPythonImp.cpp" />
     <ClCompile Include="npy.cu" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
-    <Import Project="$(VCTargetsPath)\BuildCustomizations\CUDA 12.5.targets" />
+    <Import Project="$(VCTargetsPath)\BuildCustomizations\CUDA 12.4.targets" />
   </ImportGroup>
 </Project>
