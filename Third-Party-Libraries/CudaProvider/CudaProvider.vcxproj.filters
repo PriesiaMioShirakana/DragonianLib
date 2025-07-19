@@ -53,12 +53,18 @@
     <ClInclude Include="cuFCPE.h">
       <Filter>CPython</Filter>
     </ClInclude>
+    <ClInclude Include="cuFCPEPythonImp.h">
+      <Filter>CPython</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="npy.cu">
       <Filter>Util</Filter>
     </ClCompile>
     <ClCompile Include="cuFCPE.cpp">
+      <Filter>CPython</Filter>
+    </ClCompile>
+    <ClCompile Include="cuFCPEPythonImp.cpp">
       <Filter>CPython</Filter>
     </ClCompile>
   </ItemGroup>
