@@ -71,7 +71,7 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <IncludePath>C:\DataSpace\libsvc\Third-Party-Libraries\CudaProvider;$(IncludePath)</IncludePath>
+    <IncludePath>$(ProjectDir)..;$(IncludePath)</IncludePath>
     <LibraryPath>C:\DataSpace\libsvc\Third-Party-Libraries\CudaProvider\x64\Debug;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">

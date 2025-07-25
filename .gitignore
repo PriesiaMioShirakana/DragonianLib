@@ -380,3 +380,5 @@ FodyWeavers.xsd
 /PythonScript/g2pW.onnx
 /PythonScript/SoVitsSvc4_0_SupportTensorRT/UVR
 /TestModels
+build
+*.pyd
