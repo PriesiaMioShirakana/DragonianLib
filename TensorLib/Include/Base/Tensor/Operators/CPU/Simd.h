@@ -51,13 +51,13 @@ _D_Dragonian_Lib_Operator_Space_Begin
  * @brief Warpper for SIMD
  * @tparam Type Type of the data
  */
-template<typename Type, typename = std::enable_if_t<TypeTraits::IsAvx256SupportedValue<Type>>>
+template<typename Type>
 class Vectorized
 {
 public:
 	static constexpr size_t Alignment = sizeof(__m256); // AVX-256 requires 32-byte alignment
-	static constexpr size_t Stride = sizeof(__m256) / sizeof(Type);
-	static constexpr size_t size() { return sizeof(__m256) / sizeof(Type); }
+	static constexpr size_t Stride = IsAvx256SupportedValue<Type> ? sizeof(__m256) / sizeof(Type) : 8;
+	static constexpr size_t size() { return Stride; }
 	_D_Dragonian_Lib_Constexpr_Force_Inline Vectorized() = default;
 	_D_Dragonian_Lib_Constexpr_Force_Inline ~Vectorized() = default;
 	_D_Dragonian_Lib_Constexpr_Force_Inline Vectorized(const Vectorized&) = default;
@@ -1777,13 +1777,13 @@ template <
 	typename _FunctionTypePre, typename _FunctionTypeMid, typename _FunctionTypeEnd,
 	typename _FunctionTypePreVec, typename _FunctionTypeMidVec
 > Type ReduceFunction(
-	const Type* _Src, SizeType _Size, Type _InitValue,
+	const Type* _Src, SizeType _Size, const Type& _InitValue,
 	_FunctionTypePre _PreFunction,
 	_FunctionTypePreVec _PreFunctionVec,
 	_FunctionTypeMid _MidFunction,
 	_FunctionTypeMidVec _MidFunctionVec,
 	_FunctionTypeEnd _EndFunction
-) requires (IsCallableValue<_FunctionTypeMid>)
+) requires (IsInvocableValue<_FunctionTypeMid, Type, Type>)
 {
 	using VectorType = Vectorized<Type>;
 
@@ -1791,14 +1791,14 @@ template <
 	constexpr Int64 LoopStride = Throughput * Stride;
 
 	auto _MyResultValue = _InitValue;
-	if constexpr (TypeTraits::IsAvx256SupportedValue<Type> && IsCallableValue<_FunctionTypeMidVec>)
+	if constexpr (TypeTraits::IsAvx256SupportedValue<Type> && IsInvocableValue<_FunctionTypeMidVec, VectorType, VectorType>)
 	{
 		if (_Size >= LoopStride)
 		{
 			while (size_t(_Src) % sizeof(__m256) && _Size > 0)
 			{
 				auto _Value = *_Src++;
-				if constexpr (IsCallableValue<_FunctionTypePre>)
+				if constexpr (IsInvocableValue<_FunctionTypePre, decltype(_Value)>)
 					_Value = _PreFunction(_Value);
 				_MyResultValue = _MidFunction(_MyResultValue, _Value);
 				--_Size;
@@ -1813,7 +1813,7 @@ template <
 				{
 					for (Int64 i = 0; i < Throughput; ++i)
 						VectorizedSource[i] = VectorType(_Src + i * Stride);
-					if constexpr (IsCallableValue<_FunctionTypePreVec>)
+					if constexpr (IsInvocableValue<_FunctionTypePreVec, VectorType>)
 						for (Int64 i = 0; i < Throughput; ++i)
 							VectorizedSource[i] = _PreFunctionVec(VectorizedSource[i]);
 					for (Int64 i = 0; i < Throughput; ++i)
@@ -1836,7 +1836,7 @@ template <
 		for (Int64 i = 0; i < LoopStride; ++i)
 		{
 			auto _Value = _Src[i];
-			if constexpr (IsCallableValue<_FunctionTypePre>)
+			if constexpr (IsInvocableValue<_FunctionTypePre, decltype(_Value)>)
 				_Value = _PreFunction(_Value);
 			_MyResultValue = _MidFunction(_MyResultValue, _Value);
 		}
@@ -1847,12 +1847,12 @@ template <
 	while (_Size > 0)
 	{
 		auto _Value = *_Src++;
-		if constexpr (IsCallableValue<_FunctionTypePre>)
+		if constexpr (IsInvocableValue<_FunctionTypePre, decltype(_Value)>)
 			_Value = _PreFunction(_Value);
 		_MyResultValue = _MidFunction(_MyResultValue, _Value);
 		--_Size;
 	}
-	if constexpr (IsCallableValue<_FunctionTypeEnd>)
+	if constexpr (IsInvocableValue<_FunctionTypeEnd, decltype(_MyResultValue)>)
 		return _EndFunction(_MyResultValue);
 	else
 		return _MyResultValue;
@@ -1860,28 +1860,24 @@ template <
 
 template <
 	typename _RetType, typename _InputType, typename _ParameterType,
-	typename _FunctionType, _FunctionType _Function,
-	typename _VectorizedFunctionType, _VectorizedFunctionType _VectorizedFunction,
-	TypeDef::OperatorType _OType,
-	bool IsCompare,
-	Int64 OpThroughput
+	typename _FunctionType, TypeDef::OperatorType _OType, bool IsCompare, Int64 OpThroughput
 > void VectorizedFunction(
 	_RetType* _Dest,
 	SizeType _DestSize,
-	const _InputType* _Src1 = nullptr,
-	const _InputType* _Src2 = nullptr,
-	std::shared_ptr<_ParameterType> _IValPtr = nullptr
+	const _InputType* _Src1,
+	const _InputType* _Src2,
+	_ParameterType _Value,
+	const _FunctionType& _Function
 )
 {
 	using VectorType = Vectorized<_InputType>;
 
-	auto _ValPtr = std::move(_IValPtr);
 	constexpr Int64 Stride = VectorType::Stride;
 	constexpr Int64 LoopStride = OpThroughput * Stride;
 
 	if constexpr (TypeTraits::IsAvx256SupportedValue<_InputType>)
 	{
-		if (SimdTypeTraits::IsAvxEnabled<_InputType, _VectorizedFunctionType, _VectorizedFunction>::Get())
+		if (SimdTypeTraits::IsAvxEnabled<_InputType, decltype(_Function), _Function>::Get())
 		{
 			while (size_t(_Dest) % sizeof(__m256) && _DestSize > 0)
 			{
@@ -1890,15 +1886,15 @@ template <
 				else if constexpr (_OType == TypeDef::BinaryOperatorType)
 					*_Dest++ = (_RetType)_Function(*_Src1++, *_Src2++);
 				else if constexpr (_OType == TypeDef::ConstantOperatorType)
-					*_Dest++ = (_RetType)_Function(*_Src1++, *_ValPtr);
+					*_Dest++ = (_RetType)_Function(*_Src1++, _Value);
 				else if constexpr (_OType == TypeDef::ReversedConstantOperatorType)
-					*_Dest++ = (_RetType)_Function(*_ValPtr, *_Src1++);
+					*_Dest++ = (_RetType)_Function(_Value, *_Src1++);
 				--_DestSize;
 			}
 
 			Vectorized<_InputType> VectorizedValue[OpThroughput * 2];
 			if constexpr (_OType == TypeDef::ConstantOperatorType)
-				VectorizedValue[OpThroughput] = Vectorized<_InputType>(*_ValPtr);
+				VectorizedValue[OpThroughput] = Vectorized<_InputType>(_Value);
 
 			while (_DestSize >= LoopStride)
 			{
@@ -1907,20 +1903,20 @@ template <
 
 				if constexpr (_OType == TypeDef::UnaryOperatorType)
 					for (Int64 i = 0; i < OpThroughput; ++i)
-						VectorizedValue[i] = _VectorizedFunction(VectorizedValue[i]);
+						VectorizedValue[i] = _Function(VectorizedValue[i]);
 				else if constexpr (_OType == TypeDef::BinaryOperatorType)
 				{
 					for (Int64 i = 0; i < OpThroughput; ++i)
 						VectorizedValue[i + OpThroughput] = Vectorized<_InputType>(_Src2 + i * Stride);
 					for (Int64 i = 0; i < OpThroughput; ++i)
-						VectorizedValue[i] = _VectorizedFunction(VectorizedValue[i], VectorizedValue[i + OpThroughput]);
+						VectorizedValue[i] = _Function(VectorizedValue[i], VectorizedValue[i + OpThroughput]);
 				}
 				else if constexpr (_OType == TypeDef::ConstantOperatorType)
 					for (Int64 i = 0; i < OpThroughput; ++i)
-						VectorizedValue[i] = _VectorizedFunction(VectorizedValue[i], VectorizedValue[OpThroughput]);
+						VectorizedValue[i] = _Function(VectorizedValue[i], VectorizedValue[OpThroughput]);
 				else if constexpr (_OType == TypeDef::ReversedConstantOperatorType)
 					for (Int64 i = 0; i < OpThroughput; ++i)
-						VectorizedValue[i] = _VectorizedFunction(VectorizedValue[OpThroughput], VectorizedValue[i]);
+						VectorizedValue[i] = _Function(VectorizedValue[OpThroughput], VectorizedValue[i]);
 
 				for (Int64 i = 0; i < OpThroughput; ++i)
 					if constexpr (IsCompare)
@@ -1943,9 +1939,9 @@ template <
 			else if constexpr (_OType == TypeDef::BinaryOperatorType)
 				_Dest[i] = (_RetType)_Function(_Src1[i], _Src2[i]);
 			else if constexpr (_OType == TypeDef::ConstantOperatorType)
-				_Dest[i] = (_RetType)_Function(_Src1[i], *_ValPtr);
+				_Dest[i] = (_RetType)_Function(_Src1[i], _Value);
 			else if constexpr (_OType == TypeDef::ReversedConstantOperatorType)
-				_Dest[i] = (_RetType)_Function(*_ValPtr, _Src1[i]);
+				_Dest[i] = (_RetType)_Function(_Value, _Src1[i]);
 		}
 		_Dest += LoopStride;
 		_Src1 += LoopStride;
@@ -1961,60 +1957,9 @@ template <
 		else if constexpr (_OType == TypeDef::BinaryOperatorType)
 			*_Dest++ = (_RetType)_Function(*_Src1++, *_Src2++);
 		else if constexpr (_OType == TypeDef::ConstantOperatorType)
-			*_Dest++ = (_RetType)_Function(*_Src1++, *_ValPtr);
+			*_Dest++ = (_RetType)_Function(*_Src1++, _Value);
 		else if constexpr (_OType == TypeDef::ReversedConstantOperatorType)
-			*_Dest++ = (_RetType)_Function(*_ValPtr, *_Src1++);
-		--_DestSize;
-	}
-}
-
-template <
-	typename _RetType, typename _InputType, typename _ParameterType,
-	typename _FunctionType, _FunctionType _Function,
-	TypeDef::OperatorType _OType,
-	Int64 OpThroughput
-> void ContiguousFunction(
-	_RetType* _Dest,
-	SizeType _DestSize,
-	const _InputType* _Src1 = nullptr,
-	const _InputType* _Src2 = nullptr,
-	const std::shared_ptr<_ParameterType> _IValPtr = nullptr
-)
-{
-	auto _ValPtr = std::move(_IValPtr);
-	constexpr Int64 Stride = Int64(sizeof(__m256) / sizeof(_InputType));
-	constexpr Int64 LoopStride = OpThroughput * Stride;
-
-	while (_DestSize > LoopStride)
-	{
-		for (Int64 i = 0; i < OpThroughput; ++i)
-		{
-			if constexpr (_OType == TypeDef::UnaryOperatorType)
-				_Dest[i] = (_RetType)_Function(_Src1[i]);
-			else if constexpr (_OType == TypeDef::BinaryOperatorType)
-				_Dest[i] = (_RetType)_Function(_Src1[i], _Src2[i]);
-			else if constexpr (_OType == TypeDef::ConstantOperatorType)
-				_Dest[i] = (_RetType)_Function(_Src1[i], *_ValPtr);
-			else if constexpr (_OType == TypeDef::ReversedConstantOperatorType)
-				_Dest[i] = (_RetType)_Function(*_ValPtr, _Src1[i]);
-		}
-		_Dest += LoopStride;
-		_Src1 += LoopStride;
-		if constexpr (_OType == TypeDef::BinaryOperatorType)
-			_Src2 += LoopStride;
-		_DestSize -= LoopStride;
-	}
-
-	while (_DestSize > 0)
-	{
-		if constexpr (_OType == TypeDef::UnaryOperatorType)
-			*_Dest++ = (_RetType)_Function(*_Src1++);
-		else if constexpr (_OType == TypeDef::BinaryOperatorType)
-			*_Dest++ = (_RetType)_Function(*_Src1++, *_Src2++);
-		else if constexpr (_OType == TypeDef::ConstantOperatorType)
-			*_Dest++ = (_RetType)_Function(*_Src1++, *_ValPtr);
-		else if constexpr (_OType == TypeDef::ReversedConstantOperatorType)
-			*_Dest++ = (_RetType)_Function(*_ValPtr, *_Src1++);
+			*_Dest++ = (_RetType)_Function(_Value, *_Src1++);
 		--_DestSize;
 	}
 }

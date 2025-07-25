@@ -282,29 +282,35 @@ namespace DragonianLib
             MelKernel(
                 unsigned samplingRate = 16000,
                 unsigned melBins = 128,
-                unsigned fftLength = 1024,
+                unsigned fftSize = 1024,
                 unsigned windowSize = 1024,
                 unsigned hopSize = 160,
                 moduleValueType freqMin = 0.f,
                 moduleValueType freqMax = 8000.f,
                 moduleValueType clipVal = 1e-5f
-            ) : m_samplingRate(samplingRate), m_melBins(melBins), m_fftSize(fftLength), m_windowSize(windowSize),
+            ) : m_samplingRate(samplingRate), m_melBins(melBins), m_fftSize(fftSize), m_windowSize(windowSize),
                 m_hopSize(hopSize), m_freqMin(freqMin), m_freqMax(freqMax), m_clipVal(clipVal)
             {
                 Init();
             }
 
-            layerStatus_t Stft(
+            static layerStatus_t Stft(
                 const Tensor<moduleValueType>& input,
                 Tensor<moduleValueType>& output,
                 Tensor<moduleValueType>& cacheWindows,
+                unsigned fftSize = 1024,
+                unsigned windowSize = 1024,
+                unsigned hopSize = 160,
+                const moduleValueType* window = nullptr,
+                bool padding = true,
                 bool center = false
-            ) const noexcept;
+            ) noexcept;
 
             layerStatus_t Forward(
                 const Tensor<moduleValueType>& input,
                 Tensor<moduleValueType>& output,
                 Tensor<moduleValueType>& midCache,
+                bool padding = true,
                 bool center = false
             ) const noexcept;
 

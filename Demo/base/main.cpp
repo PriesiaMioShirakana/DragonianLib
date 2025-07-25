@@ -14,7 +14,7 @@ int main()
 {
 #ifndef DRAGONIANLIB_USE_SHARED_LIBS
 	const int size = 10;
-	auto [audio, sr] = DragonianLib::AvCodec::OpenInputStream(LR"(C:\DataSpace\MediaProj\PlayList\Echoism_vocals.wav)").DecodeAudio(1);
+	auto [audio, sr] = DragonianLib::AvCodec::OpenInputStream(LR"(C:\Users\17518\Downloads\lbwnv16k.wav)").DecodeAudio(1);
 
 	auto v = audio.View(1, 1, -1);
 	v = v.Interpolate<DragonianLib::Operators::InterpolateMode::Linear>(
@@ -22,13 +22,13 @@ int main()
 		DragonianLib::IScale( double(16000) / double(sr) )
 	);
 	v.Evaluate();
+	
 	DragonianLib::NumpyFileFormat::SaveNumpyFile(
-		LR"(C:\DataSpace\MediaProj\PlayList\Echoism_vocals.npy)",
+		LR"(C:\Users\17518\Downloads\lbwnv16k.npy)",
 		v.Shape(),
 		v.Data(),
 		v.ElementCount()
 	);
-
 
 	return 0;
 #endif

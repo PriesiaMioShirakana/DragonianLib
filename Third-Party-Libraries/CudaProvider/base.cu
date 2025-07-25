@@ -22,8 +22,8 @@ namespace DragonianLib
             ~Timer()
             {
                 if (Handle && *Handle) CudaProvider::asyncCudaStream(getHandleStream(*Handle));
-                auto end = std::chrono::high_resolution_clock::now();
-                auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - Start).count();
+                const auto end = std::chrono::high_resolution_clock::now();
+                const auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - Start).count();
                 printf("%s: %lld us\n", Name.c_str(), duration);
             }
 
@@ -36,7 +36,7 @@ namespace DragonianLib
         handle_t createHandle()
         {
             cublasHandle_t Handle;
-            if (auto Ret = cublasCreate(&Handle))
+            if (const auto Ret = cublasCreate(&Handle))
                 fprintf(stderr, "%s\n", cublasGetStatusString(Ret));
             cublasSetMathMode(Handle, CUBLAS_TF32_TENSOR_OP_MATH);
             return handle_t(Handle);
@@ -62,7 +62,7 @@ namespace DragonianLib
         stream_t getHandleStream(handle_t handle)
         {
             cudaStream_t stream;
-            if (auto Ret = cublasGetStream((cublasHandle_t)handle, &stream))
+            if (const auto Ret = cublasGetStream((cublasHandle_t)handle, &stream))
                 fprintf(stderr, "%s\n", cublasGetStatusString(Ret));
             return stream_t(stream);
         }
@@ -219,11 +219,11 @@ namespace DragonianLib
                 throw std::runtime_error("m_fftSize could not less than m_windowSize");
 
             m_window.Resize(m_windowSize);
-            auto Window = HannWindow(m_windowSize);
+            const auto Window = HannWindow(m_windowSize);
             CudaProvider::cpy2Device(m_window.Data, Window.data(), Window.size(), nullptr);
 
-            double MEL_MIN = HZ2Mel(m_freqMin);
-            double MEL_MAX = HZ2Mel(m_freqMax);
+            const double MEL_MIN = HZ2Mel(static_cast<double>(m_freqMin));
+            const double MEL_MAX = HZ2Mel(static_cast<double>(m_freqMax));
             m_specBins = m_fftSize / 2 + 1;
 
             auto Weight = std::vector<std::vector<moduleValueType>>(m_melBins, std::vector<moduleValueType>(m_specBins));
@@ -245,8 +245,8 @@ namespace DragonianLib
             for (auto& POINT : FFT_FREQS)
                 POINT *= VAl;
 
-            auto F_DIFF = Diff(MEL_F);
-            auto RAMPS = Outer(MEL_F, FFT_FREQS);
+            const auto F_DIFF = Diff(MEL_F);
+            const auto RAMPS = Outer(MEL_F, FFT_FREQS);
 
             for (unsigned i = 0; i < m_melBins; ++i)
             {
@@ -254,7 +254,7 @@ namespace DragonianLib
                 auto LOWER = -RAMPS[i] / F_DIFF[i];
                 Weight[i] = Max(Min(LOWER, UPPER), 0.f);
             }
-            auto ENORM = std::vector<moduleValueType>{ MEL_F.begin() + 2, MEL_F.end() } -
+            const auto ENORM = std::vector<moduleValueType>{ MEL_F.begin() + 2, MEL_F.end() } -
                 std::vector<moduleValueType>{ MEL_F.begin(), MEL_F.begin() + m_melBins };
             (Weight *= 2) /= ENORM;
             m_melBasis.Resize(m_melBins, m_specBins);
@@ -276,7 +276,7 @@ namespace DragonianLib
             unsigned signalLength,
             unsigned windowSize,
             unsigned hopSize,
-            unsigned center
+            unsigned paddingCount
         )
         {
 			//[batchSize, frameCount, fftSize]
@@ -289,16 +289,16 @@ namespace DragonianLib
             if (frameIdx >= frameCount || sigIdx >= fftSize)
                 return;
 
-            const unsigned srcBegIdx = (center ? windowSize / 2 : 0) + frameIdx * hopSize;
+            const int srcBegIdx = int(frameIdx * hopSize) - int(paddingCount) / 2;
 			const unsigned curRemain = signalLength - srcBegIdx - 1;
 
 			//inSignal[batchSize, :]
-            auto srcData = inSignal + (ptrdiff_t)batchIdx * signalLength + srcBegIdx;
+			const auto srcData = inSignal + (ptrdiff_t)batchIdx * signalLength + srcBegIdx;
 			//outWindows[batchIdx, frameIdx, :]
-            auto dstData = outWindows + (ptrdiff_t)(batchIdx * frameCount + frameIdx) * fftSize;
+			const auto dstData = outWindows + (ptrdiff_t)(batchIdx * frameCount + frameIdx) * fftSize;
 
-            if (sigIdx < off || sigIdx > curRemain)
-                dstData[sigIdx] = 0.f;
+            if (sigIdx < off || sigIdx > curRemain || int(sigIdx) + srcBegIdx < 0)
+            	dstData[sigIdx] = 0.f;
             else
                 dstData[sigIdx] = inWindow[sigIdx - off] * srcData[sigIdx];
         }
@@ -307,20 +307,35 @@ namespace DragonianLib
             const Tensor<moduleValueType>& input,
             Tensor<moduleValueType>& output,
             Tensor<moduleValueType>& cacheWindows,
+            unsigned fftSize,
+			unsigned windowSize,
+			unsigned hopSize,
+			const moduleValueType* window,
+            bool padding,
             bool center
-        ) const noexcept try
+        ) noexcept try
         {
 #if DRAGONIANLIB_CUDA_EP_BENCHMARK
             auto __BENCH_TM_BEG = Timer("Stft", &output.Handle);
 #endif
 
+            if (!window)
+            {
+				CudaProvider::__LastError = "Window is not set!";
+	            return LAYER_STATUS_FATAL_ERROR;
+            }
+
+			const unsigned m_specBins = fftSize / 2 + 1;
             const auto Stream = (cudaStream_t)getHandleStream(input.Handle);
 
+            auto paddingCount = padding ? windowSize - hopSize : 0;
+            paddingCount = center ? windowSize : paddingCount;
+			printf("Padding count: %u\n", paddingCount);
             const auto signalBatch = input.H * input.C * input.N; const auto signalLength = input.W;
-            const auto frames = (signalLength - m_windowSize) / m_hopSize + 1;
-            //const auto correctSize = frames * m_hopSize + (m_fftLength - m_hopSize);
+            const auto frames = (signalLength - windowSize + paddingCount) / hopSize + 1;
+            //const auto correctSize = frames * hopSize + (fftSize - hopSize);
 
-            cacheWindows.Resize(signalBatch, frames, m_fftSize);
+            cacheWindows.Resize(signalBatch, frames, fftSize);
             if (cacheWindows.Handle) CudaProvider::asyncCudaStream(getHandleStream(cacheWindows.Handle));
             cacheWindows.Handle = input.Handle;
 
@@ -329,7 +344,7 @@ namespace DragonianLib
                 32
             );
             dim3 gridSize(
-                (m_fftSize + blockSize.x - 1) / blockSize.x,
+                (fftSize + blockSize.x - 1) / blockSize.x,
                 (frames + blockSize.y - 1) / blockSize.y,
                 signalBatch
             );
@@ -337,13 +352,13 @@ namespace DragonianLib
             appendWindow<<<gridSize, blockSize, 0, Stream>>>(
                 cacheWindows.Data,
                 input.Data,
-                m_window.Data,
+                window,
                 frames,
-                m_fftSize,
+                fftSize,
                 signalLength,
-                m_windowSize,
-                m_hopSize,
-                center
+                windowSize,
+                hopSize,
+                paddingCount
             );
 
             output.Resize(signalBatch, frames, m_specBins, 2);
@@ -351,12 +366,12 @@ namespace DragonianLib
             output.Handle = input.Handle;
 
             cufftHandle handle;
-            int n[] = { static_cast<int>(m_fftSize) };
-            int inembed[] = { static_cast<int>(signalBatch * frames), static_cast<int>(m_fftSize) };
+            int n[] = { static_cast<int>(fftSize) };
+            int inembed[] = { static_cast<int>(signalBatch * frames), static_cast<int>(fftSize) };
             int oembed[] = { static_cast<int>(signalBatch * frames), static_cast<int>(m_specBins) };
             if (cufftPlanMany(
                 &handle, 1, n,
-                inembed, 1, static_cast<int>(m_fftSize),
+                inembed, 1, static_cast<int>(fftSize),
                 oembed, 1, static_cast<int>(m_specBins),
                 CUFFT_R2C, static_cast<int>(signalBatch * frames)) ||
                 cufftSetStream(handle, Stream) ||
@@ -394,7 +409,7 @@ namespace DragonianLib
             //batchSize, frameLength, specBins, 2
             const unsigned inIdx = ((batchIdx * frameLength + frameIdx) * specBins + binIdx) * 2;
 
-            moduleValueType real = iSpec[inIdx], imag = iSpec[inIdx + 1];
+			const moduleValueType real = iSpec[inIdx], imag = iSpec[inIdx + 1];
             oPowerSpec[outIdx] = sqrtf(real * real + imag * imag + 1e-9f);
         }
 
@@ -416,6 +431,7 @@ namespace DragonianLib
             const Tensor<moduleValueType>& input,
             Tensor<moduleValueType>& output,
             Tensor<moduleValueType>& midCache,
+            bool padding,
             bool center
         ) const noexcept try
         {
@@ -423,10 +439,15 @@ namespace DragonianLib
             auto __BENCH_TM_BEG = Timer("MelSpec", &output.Handle);
 #endif
 
-            if (auto Ret = Stft(
+            if (const auto Ret = Stft(
                 input,
                 output,
                 midCache,
+				m_fftSize,
+				m_windowSize,
+				m_hopSize,
+				m_window.Data,
+                padding,
                 center
             )) return Ret;
 
@@ -477,7 +498,7 @@ namespace DragonianLib
                 (int)batchSize
             )) return static_cast<layerStatus_t>(Ret);
 
-            auto size = output.N * output.C * output.W * output.H;
+            const auto size = output.N * output.C * output.W * output.H;
             dim3 blockLength(DRAGONIANLIB_CUDA_BLOCK_SIZE);
             dim3 gridLength((size + blockLength.x - 1) / blockLength.x);
             dynamicRangeCompression<<<gridLength, blockLength, 0, Stream>>>(
@@ -510,13 +531,13 @@ namespace DragonianLib
 
         void Module::LoadModel(DictType& dict)
         {
-            for (auto layer : Children)
+            for (const auto layer : Children)
                 layer->LoadModel(dict);
         }
 
         void Parameter::LoadModel(DictType& dict)
         {
-            auto weight = dict.find(Name);
+	        const auto weight = dict.find(Name);
             if (weight != dict.end())
             {
                 if (Strict)
@@ -538,8 +559,8 @@ namespace DragonianLib
             const unsigned ty = threadIdx.y;
             const unsigned tx = threadIdx.x;
 
-            unsigned y = blockIdx.y * blockDim.y + ty;
-            unsigned x = blockIdx.x * blockDim.x + tx;
+            const unsigned y = blockIdx.y * blockDim.y + ty;
+            const unsigned x = blockIdx.x * blockDim.x + tx;
 
             extern __shared__ moduleValueType broadcastAddSharedBias[];
 
@@ -741,7 +762,7 @@ namespace DragonianLib
 
             extern __shared__ moduleValueType implNormalizeSharedMem[];
 
-            auto implNormalizeShared = implNormalizeSharedMem + 2ll * ty;
+            const auto implNormalizeShared = implNormalizeSharedMem + 2ll * ty;
 
             if (threadIdx.x == 0)
             {
@@ -751,7 +772,7 @@ namespace DragonianLib
 
             __syncthreads();
 
-            auto idx = y * featureSize + x;
+            const auto idx = y * featureSize + x;
             ioFeat[idx] = (ioFeat[idx] - implNormalizeShared[0]) / implNormalizeShared[1];
         }
 
@@ -811,8 +832,8 @@ namespace DragonianLib
             const unsigned ty = threadIdx.y;
             const unsigned tx = threadIdx.x;
 
-            unsigned y = blockIdx.y * blockDim.y + ty;
-            unsigned x = blockIdx.x * blockDim.x + tx;
+            const unsigned y = blockIdx.y * blockDim.y + ty;
+            const unsigned x = blockIdx.x * blockDim.x + tx;
 
             extern __shared__ moduleValueType implAffineSharedMem[];
 
@@ -838,8 +859,8 @@ namespace DragonianLib
             const unsigned ty = threadIdx.y;
             const unsigned tx = threadIdx.x;
 
-            unsigned y = blockIdx.y * blockDim.y + ty;
-            unsigned x = blockIdx.x * blockDim.x + tx;
+            const unsigned y = blockIdx.y * blockDim.y + ty;
+            const unsigned x = blockIdx.x * blockDim.x + tx;
 
             extern __shared__ moduleValueType implAffineBiasSharedMem[];
 
@@ -869,8 +890,8 @@ namespace DragonianLib
             const unsigned ty = threadIdx.y;
             const unsigned tx = threadIdx.x;
 
-            unsigned y = blockIdx.y * blockDim.y + ty;
-            unsigned x = blockIdx.x * blockDim.x + tx;
+            const unsigned y = blockIdx.y * blockDim.y + ty;
+            const unsigned x = blockIdx.x * blockDim.x + tx;
 
             extern __shared__ moduleValueType implAffineBias2DSharedMem[];
 
@@ -899,8 +920,8 @@ namespace DragonianLib
             const unsigned ty = threadIdx.y;
             const unsigned tx = threadIdx.x;
 
-            unsigned y = blockIdx.y * blockDim.y + ty;
-            unsigned x = blockIdx.x * blockDim.x + tx;
+            const unsigned y = blockIdx.y * blockDim.y + ty;
+            const unsigned x = blockIdx.x * blockDim.x + tx;
 
             extern __shared__ moduleValueType implBias2DSharedMem[];
 
@@ -941,11 +962,11 @@ namespace DragonianLib
 			auto __BENCH_TM_BEG = Timer("Linear " + Name, &output.Handle);
 #endif
 
-            unsigned inFeature = input.W;
+	        const unsigned inFeature = input.W;
             if (inFeature != InFeatureDim)
                 return LAYER_STATUS_SIZE_MISMATCH;
 
-            unsigned inputSize = input.N * input.C * input.H;
+	        const unsigned inputSize = input.N * input.C * input.H;
             if (input.Dim == 4)
                 output.Resize(input.N, input.C, input.H, OutFeatureDim);
             else if (input.Dim == 3)
@@ -1026,7 +1047,7 @@ namespace DragonianLib
             if (featureDim != NumChannels)
                 return LAYER_STATUS_SIZE_MISMATCH;
 
-            unsigned sampleCountNorm = output.N * output.C * output.H;
+            const unsigned sampleCountNorm = output.N * output.C * output.H;
             mean.Resize(sampleCountNorm);
             var.Resize(sampleCountNorm);
             if (mean.Handle) CudaProvider::asyncCudaStream(getHandleStream(mean.Handle));
@@ -1104,15 +1125,15 @@ namespace DragonianLib
 			auto __BENCH_TM_BEG = Timer("GroupNorm1D " + Name, &output.Handle);
 #endif
 
-            unsigned featureDim = output.H;
+	        const unsigned featureDim = output.H;
             if (featureDim != NumChannels)
                 return LAYER_STATUS_SIZE_MISMATCH;
 
-            unsigned batchSize = output.N * output.C;
-            unsigned featureSize = output.W;
+	        const unsigned batchSize = output.N * output.C;
+	        const unsigned featureSize = output.W;
 
-            unsigned sampleCountNorm = batchSize * NumGroups;
-            unsigned featureSizeNorm = output.H * output.W / NumGroups;
+	        const unsigned sampleCountNorm = batchSize * NumGroups;
+	        const unsigned featureSizeNorm = output.H * output.W / NumGroups;
             mean.Resize(sampleCountNorm);
             var.Resize(sampleCountNorm);
             if (mean.Handle) CudaProvider::asyncCudaStream(getHandleStream(mean.Handle));
@@ -1178,7 +1199,7 @@ namespace DragonianLib
 			auto __BENCH_TM_BEG = Timer("LeakyReLU", &output.Handle);
 #endif
 
-            auto size = output.N * output.C * output.H * output.W;
+	        const auto size = output.N * output.C * output.H * output.W;
 
             dim3 blockLength(DRAGONIANLIB_CUDA_BLOCK_SIZE);
             dim3 gridLength((size + blockLength.x - 1) / blockLength.x);
@@ -1287,7 +1308,7 @@ namespace DragonianLib
             if (col.Handle) CudaProvider::asyncCudaStream(getHandleStream(col.Handle));
             col.Handle = input.Handle;
 
-            cudaStream_t Stream = cudaStream_t(getHandleStream(input.Handle));
+            auto Stream = cudaStream_t(getHandleStream(input.Handle));
 
             static constexpr moduleValueType Alpha = 1.f;
             static constexpr moduleValueType Beta = 0.f;
@@ -1589,8 +1610,8 @@ namespace DragonianLib
             const unsigned ty = threadIdx.y;
             const unsigned tx = threadIdx.x;
 
-            unsigned y = blockIdx.y * blockDim.y + ty;
-            unsigned x = blockIdx.x * blockDim.x + tx;
+            const unsigned y = blockIdx.y * blockDim.y + ty;
+            const unsigned x = blockIdx.x * blockDim.x + tx;
 
             if (y < half && x < featureSize)
             {
@@ -1656,7 +1677,7 @@ namespace DragonianLib
 
             if (index < size)
             {
-                moduleValueType x = input[index];
+	            const moduleValueType x = input[index];
                 output[index] = x / (1.0f + expf(-x));
             }
         }

@@ -769,7 +769,6 @@ template<
 )
 {
 	static_assert((_ArgCount < 4) && (_ArgCount > 0));
-
 	auto _DestInfoOld = std::move(_IDestInfoOld);
 	auto _Src1InfoOld = std::move(_ISrc1InfoOld);
 	auto _Src2InfoOld = std::move(_ISrc2InfoOld);
@@ -983,6 +982,82 @@ template<
 		CreateTask(GetThreadPool().Commit(_Function, _Dest, _DestInfoOld, _Src1, _Src1InfoOld, _UserParameter));
 	else if constexpr (_ArgCount == 3)
 		CreateTask(GetThreadPool().Commit(_Function, _Dest, _DestInfoOld, _Src1, _Src1InfoOld, _Src2, _Src2InfoOld, _UserParameter));
+}
+
+template<int64_t UnrollCount, size_t CurRank, typename _Fn, size_t _ArgCount, size_t... ArgIndice, typename... LoopValues>
+_D_Dragonian_Lib_Constexpr_Force_Inline void UnrollLoop(
+	const std::array<const int64_t*, _ArgCount>& Stride,
+	_Fn& Func,
+	IndexSequence<ArgIndice...> IndexSqueue,
+	LoopValues... Indice
+)
+{
+	Func(Indice...);
+	if constexpr (UnrollCount - 1)
+		UnrollLoop<UnrollCount - 1, CurRank>(
+			Stride,
+			Func,
+			IndexSqueue,
+			(Indice + Stride[ArgIndice][CurRank])...
+		);
+}
+
+template<int64_t TensorRank, int64_t LoopUnfold, size_t CurRank, size_t ArgCount, typename _Fn, size_t... ArgIndice, typename... LoopValues>
+_D_Dragonian_Lib_Constexpr_Force_Inline void MakeLoopImpl(
+	const int64_t* __restrict Shape,
+	const std::array<const int64_t*, ArgCount>& Stride,
+	const _Fn& Func,
+	IndexSequence<ArgIndice...> IndexSqueue,
+	LoopValues... Indice
+) requires (TypeTraits::IsInvocableValue<_Fn, LoopValues...> && sizeof...(Indice) == ArgCount && sizeof...(ArgIndice) == ArgCount)
+{
+	if constexpr (TensorRank <= 0)
+		Func(Indice...);
+	else
+	{
+		const int64_t CurShape = *Shape;
+		if constexpr (TensorRank == 1)
+		{
+			const auto LoopCount = CurShape / LoopUnfold;
+			for (int64_t j = 0; j < LoopCount; ++j)
+			{
+				const auto i = j * LoopUnfold;
+				UnrollLoop<LoopUnfold, CurRank>(
+					Stride,
+					Func,
+					IndexSqueue,
+					(Indice + i * Stride[ArgIndice][CurRank])...
+				);
+			}
+			for (int64_t i = LoopCount * LoopUnfold; i < CurShape; ++i)
+				Func((Indice + i * Stride[ArgIndice][CurRank])...);
+		}
+		else
+		{
+			const int64_t* __restrict NextShape = Shape + 1;
+			for (int64_t i = 0; i < CurShape; ++i)
+			{
+				MakeLoopImpl<TensorRank - 1, LoopUnfold, CurRank + 1>(
+					NextShape,
+					Stride,
+					Func,
+					IndexSqueue,
+					(Indice + i * Stride[ArgIndice][CurRank])...
+				);
+			}
+		}
+	}
+}
+
+template<int64_t TensorRank, int64_t LoopUnfold, size_t ArgCount, typename _Fn, typename... LoopValues>
+constexpr void MakeLoop(
+	const int64_t* __restrict Shape,
+	const std::array<const int64_t*, ArgCount>& Stride,
+	const _Fn& Func,
+	LoopValues... Indice
+) requires (TypeTraits::IsInvocableValue<_Fn, LoopValues...> && sizeof...(Indice) == ArgCount)
+{
+	MakeLoopImpl<TensorRank, LoopUnfold, 0>(Shape, Stride, Func, MakeIndexSequence<ArgCount>{}, Indice...);
 }
 
 _D_Dragonian_Lib_Operator_Space_End
