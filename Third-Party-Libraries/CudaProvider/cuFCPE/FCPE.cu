@@ -3,7 +3,7 @@
 
 #include "fcpe.h"
 #include "cuda_runtime.h"
-#include "npy.h"
+#include "Layers/ThirdParty/Numpy.h"
 
 namespace DragonianLib
 {
@@ -33,8 +33,8 @@ namespace DragonianLib
                 const unsigned sharedIdx = ty * blockDim.x + tx;
 
                 extern __shared__ moduleValueType sharedReduceSumData[];
-                auto sharedReduceSumCentData = sharedReduceSumData + (ptrdiff_t)blockDim.y * blockDim.x;
-                auto sharedReduceCentData = sharedReduceSumData + 2ll * blockDim.y * blockDim.x;
+                const auto sharedReduceSumCentData = sharedReduceSumData + (ptrdiff_t)blockDim.y * blockDim.x;
+                const auto sharedReduceCentData = sharedReduceSumData + 2ll * blockDim.y * blockDim.x;
 
                 sharedReduceSumData[sharedIdx] = 0.f;
                 sharedReduceSumCentData[sharedIdx] = 0.f;
@@ -47,7 +47,7 @@ namespace DragonianLib
 
                 __syncthreads();
 
-                moduleValueType cFeat = iFeat[batchIdx * featureSize + featureIdx];
+                const moduleValueType cFeat = iFeat[batchIdx * featureSize + featureIdx];
                 sharedReduceSumData[sharedIdx] = cFeat;
                 sharedReduceSumCentData[sharedIdx] = cFeat * sharedReduceCentData[tx];
 
@@ -152,15 +152,15 @@ namespace DragonianLib
                 if (batchIdx >= sampleCount)
                     return;
 
-                auto cFeat = iFeat + (ptrdiff_t)batchIdx * featureSize;
-                auto cIndex = iIndex + (ptrdiff_t)batchIdx * iFeatureSize;
+                const auto cFeat = iFeat + (ptrdiff_t)batchIdx * featureSize;
+                const auto cIndex = iIndex + (ptrdiff_t)batchIdx * iFeatureSize;
 
                 moduleValueType sum = 0.f, sumCent = 0.f;
 
 				#pragma unroll
                 for (unsigned i = 0; i < iFeatureSize; ++i)
                 {
-                    int idx = cIndex[i];
+                    const int idx = cIndex[i];
                     sum += cFeat[idx];
                     sumCent += cFeat[idx] * iCentTable[idx];
                 }
@@ -188,7 +188,7 @@ namespace DragonianLib
                 int maxIdx = 0;
                 for (int i = 0; i < featureSize; ++i)
                 {
-                    auto cond = featData[i] > maxCount;
+                    const auto cond = featData[i] > maxCount;
                     maxCount = cond ? featData[i] : maxCount;
                     if constexpr (outputIdx)
                         maxIdx = cond ? i : maxIdx;
@@ -197,7 +197,7 @@ namespace DragonianLib
                 oMax[batchIdx] = maxCount;
                 if constexpr (outputIdx)
                 {
-                    auto oIdx = oMaxIdx + batchIdx * 9ll;
+                    const auto oIdx = oMaxIdx + batchIdx * 9ll;
 					#pragma unroll
                     for (int i = 0; i < 9; ++i)
                     {
@@ -283,19 +283,19 @@ namespace DragonianLib
                 Tensor<moduleValueType>& col
             ) const noexcept try
             {
-                if (auto Ret = net_0->Forward(output, mean, var)) return Ret;
+                if (const auto Ret = net_0->Forward(output, mean, var)) return Ret;
 
-                if (auto Ret = net_1.Forward(output, cache)) return Ret;
+                if (const auto Ret = net_1.Forward(output, cache)) return Ret;
 
-                if (auto Ret = net_2->Forward(cache, output, col)) return Ret;
+                if (const auto Ret = net_2->Forward(cache, output, col)) return Ret;
 
-                if (auto Ret = net_3.Forward(output, cache)) return Ret;
+                if (const auto Ret = net_3.Forward(output, cache)) return Ret;
 
-                if (auto Ret = net_4_conv->Forward(cache, output, col)) return Ret;
+                if (const auto Ret = net_4_conv->Forward(cache, output, col)) return Ret;
 
-                if (auto Ret = net_5.Forward(output)) return Ret;
+                if (const auto Ret = net_5.Forward(output)) return Ret;
 
-                if (auto Ret = net_6->Forward(output, cache, col)) return Ret;
+                if (const auto Ret = net_6->Forward(output, cache, col)) return Ret;
 
                 return net_7.Forward(cache, output);
             }
@@ -337,7 +337,7 @@ namespace DragonianLib
             {
                 res.Copy(output);
 
-                if (auto Ret = conformer->Forward(
+                if (const auto Ret = conformer->Forward(
                     output, mean, var, cache, col
                 )) return Ret;
 
@@ -381,7 +381,7 @@ namespace DragonianLib
             ) const noexcept try
             {
                 for (const auto& layer : encoder_layers)
-                    if (auto Ret = layer->Forward(
+                    if (const auto Ret = layer->Forward(
                         output,
                         mean,
                         var,
@@ -478,34 +478,34 @@ namespace DragonianLib
                 CacheTensors& caches
             ) const noexcept try
             {
-                if (auto Ret = input_stack_0->Forward(
+                if (const auto Ret = input_stack_0->Forward(
                     caches.input,
                     caches.res,
                     caches.col
                 )) return Ret;
 
-                if (auto Ret = input_stack_1->Forward(
+                if (const auto Ret = input_stack_1->Forward(
                     caches.res,
                     caches.mean,
                     caches.var
                 )) return Ret;
 
-                if (auto Ret = input_stack_2.Forward(
+                if (const auto Ret = input_stack_2.Forward(
                     caches.res
                 )) return Ret;
 
-                if (auto Ret = input_stack_3->Forward(
+                if (const auto Ret = input_stack_3->Forward(
                     caches.res,
                     caches.output,
                     caches.col
                 )) return Ret;
 
-                if (auto Ret = Transpose::Forward(
+                if (const auto Ret = Transpose::Forward(
                     caches.output,
                     caches.input
                 )) return Ret;
 
-                if (auto Ret = net->Forward(
+                if (const auto Ret = net->Forward(
                     caches.input,
                     caches.mean,
                     caches.var,
@@ -514,13 +514,13 @@ namespace DragonianLib
                     caches.col
                 )) return Ret;
 
-                if (auto Ret = norm->Forward(
+                if (const auto Ret = norm->Forward(
                     caches.input,
                     caches.mean,
                     caches.var
                 )) return Ret;
 
-                if (auto Ret = output_proj->Forward(
+                if (const auto Ret = output_proj->Forward(
                     caches.input,
                     caches.output
                 )) return Ret;
@@ -676,17 +676,17 @@ namespace DragonianLib
                 DECODER decoder
             ) const noexcept try
             {
-                if (auto Ret = Forward(caches))
+                if (const auto Ret = Forward(caches))
                     return Ret;
 				
                 if (decoder == DECODER_ARGMAX)
                 {
-	                if (auto Ret = Latent2Cents(caches, threshold))
+	                if (const auto Ret = Latent2Cents(caches, threshold))
 	                	return Ret;
                 }
                 else
                 {
-                    if (auto Ret = Latent2CentsLocal(caches, threshold))
+                    if (const auto Ret = Latent2CentsLocal(caches, threshold))
                         return Ret;
                 }
 

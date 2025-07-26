@@ -1,11 +1,10 @@
 ﻿// ReSharper disable CppClangTidyClangDiagnosticCastFunctionTypeStrict
 // ReSharper disable CppClangTidyClangDiagnosticMissingFieldInitializers
-#include <codecvt>
 #include <filesystem>
 
 #include "cuFCPE.h"
-#include "fcpe.h"
-#include "npy.h"
+#include "FCPE.h"
+#include "Layers/ThirdParty/Numpy.h"
 
 using namespace DragonianLib::CudaModules::FCPE;
 

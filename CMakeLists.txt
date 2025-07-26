@@ -120,8 +120,8 @@ set(DRAGONIANLIB_LANGUAGES CXX ASM_MASM)
 #Execusion Providers
 if(DRAGONIANLIB_CUDA)
 	add_definitions(-DDRAGONIANLIB_ENABLECUDA)
-	#list(APPEND DRAGONIANLIB_LANGUAGES CUDA)
-	#set(CMAKE_CUDA_ARCHITECTURES all)
+	list(APPEND DRAGONIANLIB_LANGUAGES CUDA)
+	set(CMAKE_CUDA_ARCHITECTURES all)
 endif()
 if (DRAGONIANLIB_ROCM)
 	add_definitions(-DDRAGONIANLIB_ENABLEROCM)
@@ -198,14 +198,12 @@ endif()
 
 #Set CUDA Libraries And Include Directories
 if(DRAGONIANLIB_CUDA)
-	find_package(CUDA REQUIRED)
-	if(libcudacxx_FOUND)
-		set(CUDA_LIBRARIES
-			libcudacxx::libcudacxx
-		)
-	elseif(NOT DEFINED CUDA_LIBRARIES OR NOT DEFINED CUDA_INCLUDE_DIRS)
-		message(FATAL_ERROR "CUDA Libraries Not Found")
-	endif()
+	find_package(CUDAToolkit REQUIRED)
+	set(CUDA_INCLUDE_DIRS ${CUDAToolkit_INCLUDE_DIRS})
+	set(CUDA_LIBRARIES 
+		CUDA::cudart
+		CUDA::cublas
+		CUDA::cufft)
 endif()
 
 #Find LibreMidi Libraries And Include Directories
@@ -507,9 +505,14 @@ else()
 endif()
 
 if(DRAGONIANLIB_CUDA)
-	set_target_properties(${DRAGONIANLIB_LIB} PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 	target_include_directories(${DRAGONIANLIB_LIB} PRIVATE ${CUDA_INCLUDE_DIRS})
 	target_link_libraries(${DRAGONIANLIB_LIB} PUBLIC ${CUDA_LIBRARIES})
+	set_target_properties(${DRAGONIANLIB_LIB} PROPERTIES
+		CUDA_STANDARD 20
+		CUDA_STANDARD_REQUIRED ON
+		CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
+		CUDA_SEPARABLE_COMPILATION OFF
+	)
 endif()
 
 #project include

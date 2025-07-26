@@ -14,16 +14,17 @@ namespace DragonianLib
 	namespace CudaProvider
 	{
 		void* cudaAllocate(size_t size);
-		int cudaFree(void* block);
-		int host2Device(void* dst, const void* src, size_t size, stream_t stream);
-		int device2Host(void* dst, const void* src, size_t size, stream_t stream);
-		int device2Device(void* dst, const void* src, size_t size, stream_t stream);
-		stream_t createCudaStream();
-		int destoryCudaStream(stream_t stream);
-		int asyncCudaStream(stream_t stream);
-		const char* getCudaError(int errorId);
-		int getLastError();
-		const std::string& getLastErrorString();
+		int cudaFree(void* block) noexcept;
+		int host2Device(void* dst, const void* src, size_t size, stream_t stream) noexcept;
+		int device2Host(void* dst, const void* src, size_t size, stream_t stream) noexcept;
+		int device2Device(void* dst, const void* src, size_t size, stream_t stream) noexcept;
+		stream_t createCudaStream() noexcept;
+		int destroyCudaStream(stream_t stream) noexcept;
+		int asyncCudaStream(stream_t stream) noexcept;
+		const char* getCudaError(int errorId) noexcept;
+		int getLastError() noexcept;
+		const std::string& getLastErrorString() noexcept;
+
 		template <typename T>
 		T* cudaAlloc(size_t size)
 		{
@@ -103,7 +104,7 @@ namespace DragonianLib
 			CudaDimensions(size_t N, const int64_t* Dims, stream_t Stream)
 			{
 				_MyData = cudaAlloc<uint32_t>(N << 1);
-				auto New = new uint32_t[N];
+				const auto New = new uint32_t[N];
 				for (size_t i = 0; i < N; ++i)
 				{
 					if (Dims[i] < 0 || Dims[i] > UINT32_MAX)
@@ -114,7 +115,7 @@ namespace DragonianLib
 					New[i] = static_cast<uint32_t>(Dims[i]);
 				}
 				std::reverse(New, New + N);
-				if (auto Ret = host2Device(_MyData, New, N * sizeof(uint32_t), Stream))
+				if (const auto Ret = host2Device(_MyData, New, N * sizeof(uint32_t), Stream))
 				{
 					delete[] New;
 					throw std::runtime_error(getCudaError(Ret));
@@ -126,7 +127,7 @@ namespace DragonianLib
 			{
 				if (_MyData)
 				{
-					if (auto Ret = cudaFree(_MyData))
+					if (const auto Ret = cudaFree(_MyData))
 					{
 						fprintf(stderr, "Error freeing CudaDimensions memory: %s\n", getCudaError(Ret));
 						abort();

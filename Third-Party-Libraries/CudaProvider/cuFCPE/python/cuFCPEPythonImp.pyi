@@ -1,4 +1,4 @@
-"""
+﻿"""
 cuFCPE Python Implementation - Type Stubs
 
 这个模块提供了 CUDA 加速的 FCPE 功能。
@@ -126,7 +126,7 @@ class PreProcessConfig:
             samplingRate: 采样率，默认 16000 Hz
             fftLength: FFT 长度，默认 1024
             windowSize: 窗口大小，默认 1024
-            hopSize: 跳跃大小，默认 160
+            hopSize: 帧移，默认 160
             melBins: Mel 滤波器组数量，默认 128
             freqMin: 最小频率，默认 0.0 Hz
             freqMax: 最大频率，默认 8000.0 Hz
@@ -151,7 +151,7 @@ class PreProcessConfig:
     
     @property
     def hopSize(self) -> int:
-        """跳跃大小"""
+        """帧移"""
         ...
     
     @property

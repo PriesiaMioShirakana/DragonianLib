@@ -1,5 +1,5 @@
 ﻿#pragma once
-#include "kernel.h"
+#include "Provider/Kernel.h"
 
 #define _DRAGONIANLIB_BINARY_DCL(Fun, Type) \
 __declspec(dllexport) void Impl##Fun##( \
@@ -49,7 +49,6 @@ namespace DragonianLib
 			_DRAGONIANLIB_BINARY_DCL_EXPORTS(Sub);
 			_DRAGONIANLIB_BINARY_DCL_EXPORTS(Mul);
 			_DRAGONIANLIB_BINARY_DCL_EXPORTS(Div);
-
 		}
 	}
 }

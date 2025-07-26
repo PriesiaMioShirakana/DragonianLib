@@ -1,6 +1,9 @@
 ﻿#pragma once
-#include "base.h"
-#include "string"
+#include <stdexcept>
+#include <vector>
+#include <string>
+
+#include "Layers/Modules/Base.h"
 
 namespace DragonianLib
 {
@@ -16,12 +19,25 @@ namespace DragonianLib
 			uint16_t headerLength = 118;
 		};
 
+#if !_MSC_VER
+		int _wfopen_s(FILE** _File, const wchar_t* _Filename, const wchar_t* _Mode)
+		{
+			char _Path[1024];
+			char _Mode[10];
+			wcstombs(_Path, _Filename, sizeof(_Path));
+			wcstombs(_Mode, _Mode, sizeof(_Mode));
+			*_File = fopen(_Path, _Mode);
+			return (*_File == nullptr) ? errno : 0;
+		}
+#endif
+
 		class FileGuard  // NOLINT(cppcoreguidelines-special-member-functions)
 		{
 		public:
 			FileGuard(const std::wstring& _Path, const wchar_t* _Mode)
 			{
-				FileHandle = _wfopen(_Path.c_str(), _Mode);
+				if (const auto error = _wfopen_s(&FileHandle, _Path.c_str(), _Mode))
+					throw std::runtime_error("Failed to open file, error code: " + std::to_string(error));
 			}
 			~FileGuard()
 			{
@@ -96,7 +112,7 @@ namespace DragonianLib
 
 			if (totalSize != _Data.size())
 				throw std::exception("Invalid shape");
-			FileGuard _MyFile(_Path, L"wb");
+			const FileGuard _MyFile(_Path, L"wb");
 			if (!_MyFile.Enabled())
 				throw std::exception("Failed to open file");
 			NumpyHeader Header;

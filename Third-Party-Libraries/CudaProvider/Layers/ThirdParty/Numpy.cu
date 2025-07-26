@@ -1,4 +1,4 @@
-﻿#include "npy.h"
+﻿#include "Numpy.h"
 
 #include <filesystem>
 #include <regex>
@@ -26,13 +26,14 @@ namespace DragonianLib
 
 		std::pair<std::vector<int64_t>, std::vector<Byte>> LoadNumpyFile(const std::wstring& _Path)
 		{
+			constexpr auto Magic = "\x93NUMPY";
 			FileGuard _MyFile(_Path, L"rb");
 			if (!_MyFile.Enabled())
 				throw std::runtime_error("Failed to open file");
 			NumpyHeader Header;
 			if (_MyFile.Read(&Header, sizeof(NumpyHeader), 1) != 1)
 				throw std::runtime_error("Failed to read header");
-			if (memcmp(Header.magic, "\x93NUMPY", 6) != 0)
+			if (memcmp(Header.magic, Magic, 6) != 0)
 				throw std::runtime_error("Invalid magic number");
 			if (Header.majorVersion != 1 || Header.minorVersion != 0)
 				throw std::runtime_error("Unsupported version");
@@ -75,7 +76,7 @@ namespace DragonianLib
 		)
 		{
 			CudaModules::Module::DictType Dict;
-			std::filesystem::path Directory(_Path);
+			const std::filesystem::path Directory(_Path);
 			for (auto& Part : std::filesystem::directory_iterator(Directory))
 			{
 				if (!Part.is_regular_file() || Part.path().extension() != L".npy")
@@ -105,18 +106,12 @@ namespace DragonianLib
 				}
 				if (Data.size() != Tensor.BufferSize * sizeof(float))
 					throw std::runtime_error("Data size mismatch for " + Part.path().string());
-				stream_t Stream = CudaProvider::createCudaStream();
-				
-				if (auto Ret = CudaProvider::cpy2Device(
+				if (const auto Ret = CudaProvider::cpy2Device(
 					Tensor.Data,
 					(const float*)Data.data(),
 					Tensor.BufferSize,
-					Stream))
-				{
-					CudaProvider::destoryCudaStream(Stream);
+					nullptr))
 					throw std::runtime_error(std::string("Failed to copy data to device: ") + CudaProvider::getCudaError(Ret));
-				}
-				CudaProvider::destoryCudaStream(Stream);
 				Dict[FileName] = std::move(Tensor);
 			}
 			return Dict;

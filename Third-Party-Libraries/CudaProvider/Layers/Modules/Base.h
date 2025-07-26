@@ -2,7 +2,7 @@
 #include <memory>
 #include <unordered_map>
 
-#include "kernel.h"
+#include "Provider/Kernel.h"
 
 #ifndef DRAGONIANLIB_CUDA_EP_BENCHMARK
 #define DRAGONIANLIB_CUDA_EP_BENCHMARK 0
@@ -97,7 +97,7 @@ namespace DragonianLib
             {
                 if (Dim == 4 && N == _N && C == _C && H == _H && W == _W) return;
 
-                auto NewSize = _W * _H * _C * _N;
+                const auto NewSize = _W * _H * _C * _N;
                 
                 if (NewSize > BufferSize)
                 {
@@ -113,7 +113,7 @@ namespace DragonianLib
             {
                 if (Dim == 3 && N == _N && H == _H && W == _W) return;
 
-                auto NewSize = _W * _H * _N;
+                const auto NewSize = _W * _H * _N;
                 
                 if (NewSize > BufferSize)
                 {
@@ -129,7 +129,7 @@ namespace DragonianLib
             {
                 if (Dim == 2 && H == _H && W == _W) return;
 
-                auto NewSize = _W * _H;
+                const auto NewSize = _W * _H;
                 
                 if (NewSize > BufferSize)
                 {
@@ -145,7 +145,7 @@ namespace DragonianLib
             {
                 if (Dim == 1 && W == _W) return;
 
-                auto NewSize = _W;
+                const auto NewSize = _W;
                 
                 if (NewSize > BufferSize)
                 {
